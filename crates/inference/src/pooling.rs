@@ -72,7 +72,23 @@ pub fn pool(
 /// In-place L2 normalization per row. A zero row is left as zeros rather than
 /// producing NaN.
 pub fn l2_normalize_rows(vectors: &mut [f32], dims: usize) {
-    let _ = (vectors, dims);
+    assert!(dims > 0);
+    assert_eq!(vectors.len() % dims, 0);
+    let rows = vectors.len() / dims;
+    for r in 0..rows {
+        let row = &mut vectors[r * dims..(r + 1) * dims];
+        let mut sum_sq = 0.0f32;
+        for &v in row.iter() {
+            sum_sq += v * v;
+        }
+        if sum_sq == 0.0 {
+            continue;
+        }
+        let inv = 1.0 / sum_sq.sqrt();
+        for v in row.iter_mut() {
+            *v *= inv;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -142,5 +158,31 @@ mod tests {
         let (hidden, mask) = synthetic();
         let out = pool(&hidden, &mask, 2, 3, 2, Pooling::Cls);
         assert_eq!(out, vec![1.0, 2.0, 10.0, 20.0]);
+    }
+
+    #[test]
+    fn l2_normalizes_three_four_to_point_six_point_eight() {
+        let mut v = vec![3.0f32, 4.0];
+        l2_normalize_rows(&mut v, 2);
+        assert!((v[0] - 0.6).abs() < 1e-6);
+        assert!((v[1] - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn l2_leaves_zero_row_as_zeros_without_nan() {
+        let mut v = vec![0.0f32, 0.0];
+        l2_normalize_rows(&mut v, 2);
+        assert_eq!(v, vec![0.0, 0.0]);
+        assert!(v.iter().all(|x| !x.is_nan()));
+    }
+
+    #[test]
+    fn l2_normalizes_rows_independently() {
+        let mut v = vec![3.0f32, 4.0, 0.0, 5.0];
+        l2_normalize_rows(&mut v, 2);
+        assert!((v[0] - 0.6).abs() < 1e-6);
+        assert!((v[1] - 0.8).abs() < 1e-6);
+        assert!((v[2] - 0.0).abs() < 1e-6);
+        assert!((v[3] - 1.0).abs() < 1e-6);
     }
 }
