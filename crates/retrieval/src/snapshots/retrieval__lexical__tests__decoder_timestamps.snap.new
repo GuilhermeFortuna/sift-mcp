@@ -1,0 +1,19 @@
+---
+source: crates/retrieval/src/lexical.rs
+assertion_line: 426
+expression: "index.search(\"decoder timestamps\", 4).unwrap()"
+---
+[
+    ScoredRow {
+        row: RowId(
+            0,
+        ),
+        score: 12.01637,
+    },
+    ScoredRow {
+        row: RowId(
+            1,
+        ),
+        score: 11.768679,
+    },
+]

@@ -379,4 +379,52 @@ mod tests {
             assert_eq!(results.first().map(|result| result.row), Some(rows[0]), "{query}");
         }
     }
+
+    #[test]
+    fn multi_word_queries_have_locked_order() {
+        let dir = tempdir().unwrap();
+        let mut store = ChunkStore::create(dir.path(), 1, "test").unwrap();
+        let records: Vec<_> = (0..4).map(record).collect();
+        let rows = store
+            .insert_batch(
+                &records
+                    .iter()
+                    .map(|record| (record.clone(), vec![f16::from_f32(0.0)]))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let docs = vec![
+            LexicalDoc {
+                symbol: "clamp_decoder_timestamps".into(),
+                signature: "fn clamp_decoder_timestamps()".into(),
+                doc_first_line: Some("Clamps regressing decoder timestamps".into()),
+                file: "src/decoder.rs".into(),
+                body: "if timestamp < previous { timestamp = previous + 1 }".into(),
+            },
+            LexicalDoc {
+                symbol: "parse_decoder_timestamps".into(),
+                signature: "fn parse_decoder_timestamps()".into(),
+                doc_first_line: Some("Parses decoder timestamps".into()),
+                file: "src/parser.rs".into(),
+                body: "decode timestamp values".into(),
+            },
+            LexicalDoc {
+                symbol: "enforce_monotonic_order".into(),
+                signature: "fn enforce_monotonic_order()".into(),
+                doc_first_line: Some("Enforces monotonic order".into()),
+                file: "src/order.rs".into(),
+                body: "sort values into monotonic order".into(),
+            },
+            document(3),
+        ];
+        let mut index = LexicalIndex::open(dir.path()).unwrap();
+        index
+            .add_batch(&rows.iter().copied().zip(docs).collect::<Vec<_>>())
+            .unwrap();
+        index.commit().unwrap();
+
+        insta::assert_debug_snapshot!("decoder_timestamps", index.search("decoder timestamps", 4).unwrap());
+        insta::assert_debug_snapshot!("regressing_timestamps", index.search("regressing timestamps", 4).unwrap());
+        insta::assert_debug_snapshot!("monotonic_order", index.search("monotonic order", 4).unwrap());
+    }
 }

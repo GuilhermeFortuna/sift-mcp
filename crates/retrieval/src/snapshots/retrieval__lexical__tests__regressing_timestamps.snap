@@ -1,0 +1,18 @@
+---
+source: crates/retrieval/src/lexical.rs
+expression: "index.search(\"regressing timestamps\", 4).unwrap()"
+---
+[
+    ScoredRow {
+        row: RowId(
+            0,
+        ),
+        score: 7.836977,
+    },
+    ScoredRow {
+        row: RowId(
+            1,
+        ),
+        score: 5.8843393,
+    },
+]
