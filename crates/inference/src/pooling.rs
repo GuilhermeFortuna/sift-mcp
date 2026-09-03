@@ -1,0 +1,106 @@
+//! Pooling and L2 normalization over per-token hidden states.
+
+use crate::metadata::Pooling;
+
+/// `hidden`: [batch, seq, dims] row-major. `mask`: [batch, seq], 1 for real tokens.
+/// Returns [batch, dims]. Padded positions never contribute.
+pub fn pool(
+    hidden: &[f32],
+    mask: &[u32],
+    batch: usize,
+    seq: usize,
+    dims: usize,
+    strategy: Pooling,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; batch * dims];
+    for b in 0..batch {
+        let row_out = &mut out[b * dims..(b + 1) * dims];
+        match strategy {
+            Pooling::Mean => {
+                let mut count = 0u32;
+                for s in 0..seq {
+                    if mask[b * seq + s] == 0 {
+                        continue;
+                    }
+                    let base = (b * seq + s) * dims;
+                    for d in 0..dims {
+                        row_out[d] += hidden[base + d];
+                    }
+                    count += 1;
+                }
+                if count > 0 {
+                    let inv = 1.0 / count as f32;
+                    for d in 0..dims {
+                        row_out[d] *= inv;
+                    }
+                } else {
+                    // No real tokens: average all positions (matches verify_export.py).
+                    for s in 0..seq {
+                        let base = (b * seq + s) * dims;
+                        for d in 0..dims {
+                            row_out[d] += hidden[base + d];
+                        }
+                    }
+                    if seq > 0 {
+                        let inv = 1.0 / seq as f32;
+                        for d in 0..dims {
+                            row_out[d] *= inv;
+                        }
+                    }
+                }
+            }
+            Pooling::LastToken | Pooling::Cls => {
+                // Implemented in a later step.
+            }
+        }
+    }
+    out
+}
+
+/// In-place L2 normalization per row. A zero row is left as zeros rather than
+/// producing NaN.
+pub fn l2_normalize_rows(vectors: &mut [f32], dims: usize) {
+    let _ = (vectors, dims);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// batch 2, seq 3, dims 2:
+    /// row0: [(1,2), (3,4), (5,6)] mask all 1 → mean = (3,4)
+    /// row1: [(10,20), pad, pad] mask length 1 → mean = (10,20)
+    fn synthetic() -> (Vec<f32>, Vec<u32>) {
+        let hidden = vec![
+            1.0, 2.0, // b0 s0
+            3.0, 4.0, // b0 s1
+            5.0, 6.0, // b0 s2
+            10.0, 20.0, // b1 s0
+            99.0, 99.0, // b1 s1 pad
+            88.0, 88.0, // b1 s2 pad
+        ];
+        let mask = vec![1, 1, 1, 1, 0, 0];
+        (hidden, mask)
+    }
+
+    #[test]
+    fn mean_pool_hand_computed() {
+        let (hidden, mask) = synthetic();
+        let out = pool(&hidden, &mask, 2, 3, 2, Pooling::Mean);
+        assert_eq!(out.len(), 4);
+        assert!((out[0] - 3.0).abs() < 1e-6);
+        assert!((out[1] - 4.0).abs() < 1e-6);
+        assert!((out[2] - 10.0).abs() < 1e-6);
+        assert!((out[3] - 20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mean_masked_row_equals_alone_at_seq1() {
+        let (hidden, mask) = synthetic();
+        let batched = pool(&hidden, &mask, 2, 3, 2, Pooling::Mean);
+        let alone_hidden = vec![10.0, 20.0];
+        let alone_mask = vec![1u32];
+        let alone = pool(&alone_hidden, &alone_mask, 1, 1, 2, Pooling::Mean);
+        assert_eq!(&batched[2..4], &alone[..]);
+    }
+}

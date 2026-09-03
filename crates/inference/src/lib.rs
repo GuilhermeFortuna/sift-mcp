@@ -4,8 +4,10 @@
 //! and structural validation that runs with no framework or GPU present.
 
 pub mod metadata;
+pub mod pooling;
 
 pub use metadata::{MetadataError, ModelMetadata, Normalize, Pooling};
+pub use pooling::{l2_normalize_rows, pool};
 
 #[cfg(test)]
 mod fixture_tests {
