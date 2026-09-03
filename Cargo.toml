@@ -22,3 +22,10 @@ edition = "2024"
 
 [workspace.dependencies]
 ort = "2.0.0-rc.13"
+rusqlite = { version = "0.32", features = ["bundled"] }
+memmap2 = "0.9"
+half = "2"
+blake3 = "1"
+thiserror = "2"
+proptest = "1"
+tempfile = "3"
