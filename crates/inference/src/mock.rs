@@ -161,4 +161,22 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn batch_split_preserves_order_and_matches_sub_batches() {
+        let m = MockEmbedder::new(16).with_batch_limit(4);
+        let texts: Vec<String> = (0..10).map(|i| format!("text-{i}")).collect();
+        let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+        let all = m.embed(&refs, Role::Document).unwrap();
+        assert_eq!(all.len(), 10);
+
+        let a = m.embed(&refs[0..4], Role::Document).unwrap();
+        let b = m.embed(&refs[4..8], Role::Document).unwrap();
+        let c = m.embed(&refs[8..10], Role::Document).unwrap();
+        let concat: Vec<_> = a.into_iter().chain(b).chain(c).collect();
+        assert_eq!(all.len(), concat.len());
+        for (i, (got, expect)) in all.iter().zip(concat.iter()).enumerate() {
+            assert_eq!(got.vector, expect.vector, "mismatch at index {i}");
+        }
+    }
 }
