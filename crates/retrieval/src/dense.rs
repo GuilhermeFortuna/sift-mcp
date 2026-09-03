@@ -11,10 +11,14 @@ pub enum DenseBackend {
     Cpu,
 }
 
-pub struct DenseIndex<'a> {
-    matrix: &'a EmbeddingMatrix,
+pub struct DenseIndex {
+    matrix: Vec<f16>,
+    rows: u64,
+    dims: u32,
+    model_id: String,
     live: LiveMask,
     backend: DenseBackend,
+    uploaded_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -46,9 +50,9 @@ impl Ord for Candidate {
     }
 }
 
-impl<'a> DenseIndex<'a> {
+impl DenseIndex {
     pub fn from_store(
-        store: &'a ChunkStore,
+        store: &ChunkStore,
         backend: DenseBackend,
     ) -> Result<Self, RetrievalError> {
         let live = LiveMask::from_store(store)?;
@@ -56,7 +60,7 @@ impl<'a> DenseIndex<'a> {
     }
 
     pub fn prepare(
-        matrix: &'a EmbeddingMatrix,
+        matrix: &EmbeddingMatrix,
         live: &LiveMask,
         backend: DenseBackend,
     ) -> Result<Self, RetrievalError> {
@@ -67,8 +71,13 @@ impl<'a> DenseIndex<'a> {
                 matrix.rows()
             )));
         }
+        let prepared = matrix.as_slice().to_vec();
         Ok(Self {
-            matrix,
+            uploaded_bytes: (prepared.len() * std::mem::size_of::<f16>()) as u64,
+            matrix: prepared,
+            rows: matrix.rows(),
+            dims: matrix.dims(),
+            model_id: matrix.model_id().to_owned(),
             live: live.clone(),
             backend,
         })
@@ -80,15 +89,15 @@ impl<'a> DenseIndex<'a> {
         model_id: &str,
         limit: usize,
     ) -> Result<Vec<ScoredRow>, RetrievalError> {
-        if query.len() != self.matrix.dims() as usize {
+        if query.len() != self.dims as usize {
             return Err(RetrievalError::DimensionMismatch {
-                expected: self.matrix.dims(),
+                expected: self.dims,
                 got: query.len() as u32,
             });
         }
-        if model_id != self.matrix.model_id() {
+        if model_id != self.model_id {
             return Err(RetrievalError::ModelMismatch {
-                expected: self.matrix.model_id().to_owned(),
+                expected: self.model_id.clone(),
                 got: model_id.to_owned(),
             });
         }
@@ -102,9 +111,9 @@ impl<'a> DenseIndex<'a> {
     }
 
     fn search_cpu(&self, query: &[f16], limit: usize) -> Result<Vec<ScoredRow>, RetrievalError> {
-        let dims = self.matrix.dims() as usize;
+        let dims = self.dims as usize;
         let mut top = BinaryHeap::with_capacity(limit.saturating_add(1));
-        for (row, vector) in self.matrix.as_slice().chunks_exact(dims).enumerate() {
+        for (row, vector) in self.matrix.chunks_exact(dims).enumerate() {
             let row = RowId::from_u64(row as u64);
             if !self.live.is_live(row) {
                 continue;
@@ -146,7 +155,52 @@ impl<'a> DenseIndex<'a> {
     }
 
     pub fn resident_bytes(&self) -> u64 {
-        (self.matrix.as_slice().len() * std::mem::size_of::<f16>()) as u64
+        (self.matrix.len() * std::mem::size_of::<f16>()) as u64
+    }
+
+    pub fn uploaded_bytes(&self) -> u64 {
+        self.uploaded_bytes
+    }
+
+    pub fn refresh(
+        &mut self,
+        matrix: &EmbeddingMatrix,
+        live: &LiveMask,
+    ) -> Result<(), RetrievalError> {
+        if matrix.dims() != self.dims {
+            return Err(RetrievalError::DimensionMismatch {
+                expected: self.dims,
+                got: matrix.dims(),
+            });
+        }
+        if matrix.model_id() != self.model_id {
+            return Err(RetrievalError::ModelMismatch {
+                expected: self.model_id.clone(),
+                got: matrix.model_id().to_owned(),
+            });
+        }
+        if matrix.rows() as usize != live.len() {
+            return Err(RetrievalError::Dense(format!(
+                "live mask has {} rows but matrix has {}",
+                live.len(),
+                matrix.rows()
+            )));
+        }
+        if matrix.rows() < self.rows {
+            return Err(RetrievalError::Dense(format!(
+                "matrix row count decreased from {} to {}; prepare a new index after compaction",
+                self.rows,
+                matrix.rows()
+            )));
+        }
+
+        let old_values = self.rows as usize * self.dims as usize;
+        let appended = &matrix.as_slice()[old_values..];
+        self.matrix.extend_from_slice(appended);
+        self.uploaded_bytes += (appended.len() * std::mem::size_of::<f16>()) as u64;
+        self.rows = matrix.rows();
+        self.live = live.clone();
+        Ok(())
     }
 }
 
@@ -474,5 +528,50 @@ mod tests {
                 .sqrt();
             assert!((norm - 1.0).abs() < 1e-3, "unexpected norm {norm}");
         }
+    }
+
+    #[test]
+    fn refresh_appends_only_new_rows_and_preserves_existing_scores() {
+        const DIMS: usize = 4;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("refresh.f16");
+        let mut matrix = EmbeddingMatrix::create(&path, DIMS as u32, "model").unwrap();
+        for index in 0..10 {
+            matrix
+                .append(&[f16::from_f32(index as f32 / 10.0); DIMS])
+                .unwrap();
+        }
+        let initial_live = LiveMask::from_bits(vec![true; 10]);
+        let mut index = DenseIndex::prepare(&matrix, &initial_live, DenseBackend::Cpu).unwrap();
+        let query = [f16::ONE; DIMS];
+        let old_score = index
+            .search(&query, "model", 10)
+            .unwrap()
+            .into_iter()
+            .find(|result| result.row == RowId::from_u64(5))
+            .unwrap()
+            .score;
+        let uploaded_before = index.uploaded_bytes();
+
+        for _ in 0..100 {
+            matrix.append(&[f16::from_f32(2.0); DIMS]).unwrap();
+        }
+        let refreshed_live = LiveMask::from_bits(vec![true; 110]);
+        index.refresh(&matrix, &refreshed_live).unwrap();
+
+        let results = index.search(&query, "model", 110).unwrap();
+        assert_eq!(results[0].row, RowId::from_u64(10));
+        assert_eq!(
+            results
+                .iter()
+                .find(|result| result.row == RowId::from_u64(5))
+                .unwrap()
+                .score,
+            old_score
+        );
+        assert_eq!(
+            index.uploaded_bytes() - uploaded_before,
+            (100 * DIMS * std::mem::size_of::<f16>()) as u64
+        );
     }
 }
