@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use tantivy::collector::TopDocs;
+use tantivy::collector::{Collector, SegmentCollector, TopDocs, TopNComputer};
 use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, TermQuery};
 use tantivy::schema::{
     FAST, Field, INDEXED, IndexRecordOption, STORED, Schema, TantivyDocument, TextFieldIndexing,
@@ -10,7 +10,9 @@ use tantivy::schema::{
 };
 use tantivy::tokenizer::TextAnalyzer;
 use tantivy::tokenizer::{TokenStream, Tokenizer};
-use tantivy::{Index, IndexReader, IndexWriter, Term};
+use tantivy::{
+    DocAddress, Index, IndexReader, IndexWriter, Score, SegmentOrdinal, SegmentReader, Term,
+};
 
 use storage::RowId;
 
@@ -64,6 +66,79 @@ pub struct LexicalIndex {
     writer: IndexWriter,
     reader: IndexReader,
     fields: Fields,
+}
+
+struct RowTopCollector {
+    limit: usize,
+}
+
+struct RowTopSegmentCollector {
+    top: TopNComputer<Score, (u64, DocAddress)>,
+    rows: tantivy::fastfield::Column<u64>,
+    segment_ord: SegmentOrdinal,
+}
+
+impl Collector for RowTopCollector {
+    type Fruit = Vec<(Score, (u64, DocAddress))>;
+    type Child = RowTopSegmentCollector;
+
+    fn for_segment(
+        &self,
+        segment_local_id: SegmentOrdinal,
+        segment: &SegmentReader,
+    ) -> tantivy::Result<Self::Child> {
+        Ok(RowTopSegmentCollector {
+            top: TopNComputer::new(self.limit),
+            rows: segment.fast_fields().u64("row")?,
+            segment_ord: segment_local_id,
+        })
+    }
+
+    fn requires_scoring(&self) -> bool {
+        true
+    }
+
+    fn merge_fruits(
+        &self,
+        segment_fruits: Vec<<Self::Child as SegmentCollector>::Fruit>,
+    ) -> tantivy::Result<Self::Fruit> {
+        let mut top: TopNComputer<Score, (u64, DocAddress)> = TopNComputer::new(self.limit);
+        for fruit in segment_fruits {
+            for (score, row_and_address) in fruit {
+                top.push(score, row_and_address);
+            }
+        }
+        Ok(top
+            .into_sorted_vec()
+            .into_iter()
+            .map(|document| (document.feature, document.doc))
+            .collect())
+    }
+}
+
+impl SegmentCollector for RowTopSegmentCollector {
+    type Fruit = Vec<(Score, (u64, DocAddress))>;
+
+    fn collect(&mut self, doc: tantivy::DocId, score: Score) {
+        self.top.push(
+            score,
+            (
+                self.rows.values.get_val(doc),
+                DocAddress {
+                    segment_ord: self.segment_ord,
+                    doc_id: doc,
+                },
+            ),
+        );
+    }
+
+    fn harvest(self) -> Self::Fruit {
+        self.top
+            .into_sorted_vec()
+            .into_iter()
+            .map(|document| (document.feature, document.doc))
+            .collect()
+    }
 }
 
 impl LexicalIndex {
@@ -167,31 +242,15 @@ impl LexicalIndex {
         };
         let searcher = self.reader.searcher();
         let top_docs = searcher
-            .search(&parsed, &TopDocs::with_limit(searcher.num_docs() as usize))
+            .search(&parsed, &RowTopCollector { limit })
             .map_err(tantivy_error)?;
         let mut rows = Vec::with_capacity(top_docs.len());
-        for (score, address) in top_docs {
-            let document = searcher
-                .doc::<TantivyDocument>(address)
-                .map_err(tantivy_error)?;
-            let Some(row) = document
-                .get_first(self.fields.row)
-                .and_then(|value| value.as_u64())
-            else {
-                continue;
-            };
+        for (score, (row, _address)) in top_docs {
             rows.push(ScoredRow {
                 row: RowId::from_u64(row),
                 score,
             });
         }
-        rows.sort_by(|left, right| {
-            right
-                .score
-                .total_cmp(&left.score)
-                .then_with(|| left.row.cmp(&right.row))
-        });
-        rows.truncate(limit);
         Ok(rows)
     }
 
