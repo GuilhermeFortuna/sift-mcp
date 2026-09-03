@@ -419,4 +419,21 @@ mod tests {
         assert_eq!(index.search(&query, "model", 100).unwrap().len(), 7);
         assert!(index.search(&query, "model", 0).unwrap().is_empty());
     }
+
+    #[test]
+    fn search_does_not_query_metadata_per_candidate() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ChunkStore::create(dir.path(), 4, "model").unwrap();
+        let chunks = (0..1_000)
+            .map(|index| (record(index), vec![f16::from_f32(0.5); 4]))
+            .collect::<Vec<_>>();
+        store.insert_batch(&chunks).unwrap();
+        let index = DenseIndex::from_store(&store, DenseBackend::Cpu).unwrap();
+        let _ = store.take_statements_prepared();
+
+        let results = index.search(&[f16::from_f32(0.5); 4], "model", 25).unwrap();
+
+        assert_eq!(results.len(), 25);
+        assert_eq!(store.take_statements_prepared(), 0);
+    }
 }
