@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 storage = { path = "../storage" }
+inference = { path = "../inference" }
 blake3 = { workspace = true }
 thiserror = { workspace = true }
 tree-sitter = { workspace = true }
@@ -21,6 +22,9 @@ globset = { workspace = true }
 memchr = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+gix = { workspace = true }
+rayon = { workspace = true }
+crossbeam-channel = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
