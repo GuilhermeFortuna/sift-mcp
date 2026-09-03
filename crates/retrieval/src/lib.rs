@@ -1,4 +1,5 @@
 mod error;
+pub mod dense;
 pub mod lexical;
 pub mod tokenize;
 

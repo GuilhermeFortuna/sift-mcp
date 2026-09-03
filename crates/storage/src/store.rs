@@ -359,6 +359,20 @@ impl ChunkStore {
         Ok(rows)
     }
 
+    /// All live matrix positions in ascending row order.
+    pub fn live_rows(&self) -> Result<Vec<RowId>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT rowid FROM chunks WHERE live = 1 ORDER BY rowid")?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                Ok(RowId::new(id as u64))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn tombstone(&mut self, rows: &[RowId]) -> Result<(), StoreError> {
         let tx = self.conn.unchecked_transaction()?;
         {
