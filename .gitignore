@@ -5,3 +5,4 @@
 /store/
 /.ort/
 /onnxruntime/
+/tools/.venv/
