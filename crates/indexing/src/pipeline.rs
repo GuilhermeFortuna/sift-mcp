@@ -607,10 +607,11 @@ impl<'a> Indexer<'a> {
                 }
             }
 
-            if consume_err.is_none() && !pending.is_empty() {
-                if let Err(e) = self.flush_batch(&mut pending, report, progress) {
-                    consume_err = Some(e);
-                }
+            if consume_err.is_none()
+                && !pending.is_empty()
+                && let Err(e) = self.flush_batch(&mut pending, report, progress)
+            {
+                consume_err = Some(e);
             }
         });
 
@@ -638,7 +639,7 @@ impl<'a> Indexer<'a> {
 
         assert_eq!(embeddings.len(), pending.len());
         let mut batch = Vec::with_capacity(pending.len());
-        for ((rec, _), emb) in pending.drain(..).zip(embeddings.into_iter()) {
+        for ((rec, _), emb) in pending.drain(..).zip(embeddings) {
             if emb.truncated {
                 report.chunks_truncated += 1;
             }

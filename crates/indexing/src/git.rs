@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use gix::bstr::ByteSlice;
-use gix::object::tree::diff::ChangeDetached;
 use gix::diff::Options as DiffOptions;
+use gix::object::tree::diff::ChangeDetached;
 
 use crate::error::IndexError;
 
@@ -77,7 +77,7 @@ impl RepoGit {
 
         Ok(changes
             .into_iter()
-            .filter_map(|c| change_to_file_change(c))
+            .filter_map(change_to_file_change)
             .collect())
     }
 

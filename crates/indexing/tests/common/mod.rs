@@ -1,5 +1,7 @@
 //! Build temporary git repositories for indexing tests.
 
+#![allow(dead_code)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -73,7 +75,7 @@ impl TempRepo {
         // Disable gpg signing for test commits.
         git(dir.path(), &["config", "commit.gpgsign", "false"]);
 
-        let mut repo = Self { dir };
+        let repo = Self { dir };
         for commit in commits {
             repo.apply_commit(commit);
         }

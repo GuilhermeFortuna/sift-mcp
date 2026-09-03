@@ -1,8 +1,8 @@
 mod common;
 
 use common::{CommitSpec, TempRepo};
-use inference::{Embedder, MockEmbedder};
 use indexing::{IndexConfig, Indexer, NullProgress};
+use inference::{Embedder, MockEmbedder};
 use storage::{ChunkStore, Integrity};
 
 const DIMS: u32 = 8;
@@ -30,8 +30,7 @@ impl Harness {
     }
 
     fn indexer(&self, config: IndexConfig) -> Indexer<'_> {
-        let store =
-            ChunkStore::create(self.store_path(), DIMS, self.embedder.model_id()).unwrap();
+        let store = ChunkStore::create(self.store_path(), DIMS, self.embedder.model_id()).unwrap();
         Indexer::open(store, &self.embedder, self.repo.path(), config).unwrap()
     }
 
@@ -48,13 +47,17 @@ fn sample_fn(name: &str) -> String {
 #[test]
 fn index_all_fixture_produces_expected_symbols() {
     let h = Harness::new(&[CommitSpec::new("init")
-        .file("a.rs", &sample_fn("alpha"))
-        .file("b.rs", &sample_fn("beta"))]);
+        .file("a.rs", sample_fn("alpha"))
+        .file("b.rs", sample_fn("beta"))]);
     let mut indexer = h.indexer(IndexConfig::default());
     let report = indexer.index_all(&mut NullProgress).unwrap();
 
     assert_eq!(report.files_indexed, 2);
-    assert!(report.chunks_added >= 2, "chunks_added={}", report.chunks_added);
+    assert!(
+        report.chunks_added >= 2,
+        "chunks_added={}",
+        report.chunks_added
+    );
     assert_eq!(report.embeddings_computed, report.chunks_added);
     assert!(matches!(
         indexer.store().verify().unwrap(),
@@ -73,7 +76,7 @@ fn index_all_fixture_produces_expected_symbols() {
 
 #[test]
 fn excluded_paths_never_opened_and_counted() {
-    let repo = TempRepo::build(&[CommitSpec::new("init").file("ok.rs", &sample_fn("ok"))]);
+    let repo = TempRepo::build(&[CommitSpec::new("init").file("ok.rs", sample_fn("ok"))]);
     // Create unreadable excluded sentinel under node_modules.
     let nm = repo.path().join("node_modules");
     std::fs::create_dir_all(&nm).unwrap();
@@ -97,8 +100,7 @@ fn excluded_paths_never_opened_and_counted() {
     let store_dir = tempfile::tempdir().unwrap();
     let embedder = MockEmbedder::new(DIMS);
     let store = ChunkStore::create(store_dir.path(), DIMS, embedder.model_id()).unwrap();
-    let mut indexer =
-        Indexer::open(store, &embedder, repo.path(), IndexConfig::default()).unwrap();
+    let mut indexer = Indexer::open(store, &embedder, repo.path(), IndexConfig::default()).unwrap();
     let report = indexer.index_all(&mut NullProgress).unwrap();
 
     assert!(report.files_excluded >= 1);
@@ -112,8 +114,8 @@ fn excluded_paths_never_opened_and_counted() {
 #[test]
 fn counters_reconcile_after_index_all() {
     let h = Harness::new(&[CommitSpec::new("init")
-        .file("a.rs", &sample_fn("a"))
-        .file("b.rs", &sample_fn("b"))]);
+        .file("a.rs", sample_fn("a"))
+        .file("b.rs", sample_fn("b"))]);
     let mut indexer = h.indexer(IndexConfig::default());
     let report = indexer.index_all(&mut NullProgress).unwrap();
     report.assert_reconciles();
@@ -123,8 +125,8 @@ fn counters_reconcile_after_index_all() {
 #[test]
 fn noop_reindex_embeds_nothing() {
     let h = Harness::new(&[CommitSpec::new("init")
-        .file("a.rs", &sample_fn("a"))
-        .file("b.rs", &sample_fn("b"))]);
+        .file("a.rs", sample_fn("a"))
+        .file("b.rs", sample_fn("b"))]);
     let mut indexer = h.indexer(IndexConfig::default());
     let first = indexer.index_all(&mut NullProgress).unwrap();
     let live = first.live_after;
