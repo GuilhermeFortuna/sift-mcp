@@ -1,10 +1,12 @@
 use std::ops::Range;
 
-use tree_sitter::{Language as TsLanguage, Node, Parser, Query, QueryCursor, StreamingIterator, Tree};
+use tree_sitter::{
+    Language as TsLanguage, Node, Parser, Query, QueryCursor, StreamingIterator, Tree,
+};
 
+use crate::Language;
 use crate::error::{ChunkDiagnostic, ChunkError};
 use crate::hash::content_hash;
-use crate::Language;
 use storage::ChunkRecord;
 
 /// Character-count approximation of the model's 512-token context
@@ -98,7 +100,7 @@ impl Chunker {
             return out;
         };
 
-        if error_ratio(&tree) >= ERROR_NODE_RATIO_THRESHOLD {
+        if error_byte_ratio(&tree) >= ERROR_NODE_RATIO_THRESHOLD {
             out.diagnostics.push(ChunkDiagnostic {
                 file: rel_path.to_string(),
                 message: format!("parse failed for {rel_path}: too many error nodes"),
@@ -193,26 +195,22 @@ impl Default for Chunker {
     }
 }
 
-fn error_ratio(tree: &Tree) -> f64 {
+fn error_byte_ratio(tree: &Tree) -> f64 {
     let root = tree.root_node();
-    let mut total = 0u64;
-    let mut errors = 0u64;
+    let total = root.end_byte().max(1);
+    let mut error_bytes = 0usize;
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        total += 1;
         if node.is_error() || node.is_missing() {
-            errors += 1;
+            error_bytes += node.end_byte().saturating_sub(node.start_byte());
+            continue;
         }
         let mut c = node.walk();
         for child in node.children(&mut c) {
             stack.push(child);
         }
     }
-    if total == 0 {
-        0.0
-    } else {
-        errors as f64 / total as f64
-    }
+    error_bytes as f64 / total as f64
 }
 
 fn collect_symbols(tree: &Tree, source: &str, cfg: &LangConfig) -> Vec<SymbolHit> {
@@ -292,7 +290,12 @@ fn qualify_names(hits: &mut [SymbolHit]) {
             .map(|(_, n)| n.rsplit("::").next().unwrap_or(&n).to_string())
             .collect();
         if !parent_simple.is_empty() {
-            let simple = hit.name.rsplit("::").next().unwrap_or(&hit.name).to_string();
+            let simple = hit
+                .name
+                .rsplit("::")
+                .next()
+                .unwrap_or(&hit.name)
+                .to_string();
             hit.name = format!("{}::{}", parent_simple.join("::"), simple);
         }
     }
@@ -432,7 +435,8 @@ fn hard_split(body: &str, signature: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut buf = String::new();
     for line in body.lines() {
-        if !buf.is_empty() && buf.chars().count() + line.chars().count() + 1 > OVERSIZE_CHAR_THRESHOLD
+        if !buf.is_empty()
+            && buf.chars().count() + line.chars().count() + 1 > OVERSIZE_CHAR_THRESHOLD
         {
             out.push(prefix_sig(signature, &buf));
             buf.clear();
@@ -552,9 +556,7 @@ fn attached_doc(source: &str, node: Node) -> (Option<usize>, Option<String>) {
                 }
             }
             let _ = start;
-            first_line = comment_lines
-                .first()
-                .map(|l| l.trim().to_string());
+            first_line = comment_lines.first().map(|l| l.trim().to_string());
         }
     }
 
@@ -592,8 +594,12 @@ fn is_doc_comment_line(line: &str) -> bool {
 
 fn map_kind(kind: &str) -> String {
     match kind {
-        "function_item" | "function_definition" | "function_declaration" | "method_definition"
-        | "method_declaration" | "function" => "function".to_string(),
+        "function_item"
+        | "function_definition"
+        | "function_declaration"
+        | "method_definition"
+        | "method_declaration"
+        | "function" => "function".to_string(),
         "struct_item" | "struct_specifier" => "struct".to_string(),
         "type_declaration" | "type_spec" => "type".to_string(),
         "class_definition" | "class_declaration" | "class_specifier" => "class".to_string(),
@@ -637,7 +643,13 @@ fn rust_config() -> Result<LangConfig, ChunkError> {
     Ok(LangConfig {
         language,
         query,
-        container_kinds: &["impl_item", "mod_item", "struct_item", "trait_item", "enum_item"],
+        container_kinds: &[
+            "impl_item",
+            "mod_item",
+            "struct_item",
+            "trait_item",
+            "enum_item",
+        ],
         statement_kinds: &[
             "let_declaration",
             "expression_statement",

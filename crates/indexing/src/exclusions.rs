@@ -84,7 +84,11 @@ impl Exclusions {
             if gi_path.is_file() {
                 let mut builder = GitignoreBuilder::new(root);
                 builder.add(&gi_path);
-                Some(builder.build().map_err(|e| ChunkError::Ignore(e.to_string()))?)
+                Some(
+                    builder
+                        .build()
+                        .map_err(|e| ChunkError::Ignore(e.to_string()))?,
+                )
             } else {
                 None
             }
@@ -115,7 +119,11 @@ impl Exclusions {
         }
         // Also match on file name alone for patterns like `.env`.
         if let Some(name) = rel.file_name()
-            && let Some(idx) = self.secret_globs.matches(Path::new(name)).into_iter().next()
+            && let Some(idx) = self
+                .secret_globs
+                .matches(Path::new(name))
+                .into_iter()
+                .next()
         {
             return Some(SkipReason::SecretPattern(self.secret_patterns[idx]));
         }
@@ -162,10 +170,7 @@ impl Exclusions {
             } else {
                 self.root.join(path)
             };
-            let is_dir = abs.is_dir()
-                || abs
-                    .to_string_lossy()
-                    .ends_with('/');
+            let is_dir = abs.is_dir() || abs.to_string_lossy().ends_with('/');
             let matched = gi.matched_path_or_any_parents(&abs, is_dir);
             if matched.is_ignore() {
                 return Some(SkipReason::GitIgnored);
@@ -203,8 +208,7 @@ fn build_globs(
     let mut builder = GlobSetBuilder::new();
     let mut patterns = Vec::with_capacity(entries.len());
     for (glob, label) in entries {
-        builder
-            .add(Glob::new(glob).map_err(|e| ChunkError::Glob(e.to_string()))?);
+        builder.add(Glob::new(glob).map_err(|e| ChunkError::Glob(e.to_string()))?);
         patterns.push(*label);
     }
     let set = builder
@@ -366,10 +370,7 @@ mod tests {
     fn null_bytes_are_binary() {
         let root = tempfile::tempdir().unwrap();
         let ex = exclusions_at(root.path());
-        assert_eq!(
-            ex.check_head(b"abc\0def"),
-            Some(SkipReason::BinaryContent)
-        );
+        assert_eq!(ex.check_head(b"abc\0def"), Some(SkipReason::BinaryContent));
     }
 
     #[test]
@@ -378,10 +379,7 @@ mod tests {
         let ex = exclusions_at(root.path());
         let bytes = MAX_FILE_BYTES + 1;
         match ex.check_size(bytes) {
-            Some(SkipReason::TooLarge {
-                bytes: b,
-                limit: l,
-            }) => {
+            Some(SkipReason::TooLarge { bytes: b, limit: l }) => {
                 assert_eq!(b, bytes);
                 assert_eq!(l, MAX_FILE_BYTES);
             }
