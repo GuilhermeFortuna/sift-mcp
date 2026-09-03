@@ -3,12 +3,13 @@
 use std::path::Path;
 
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, TermQuery};
 use tantivy::schema::{
     FAST, Field, INDEXED, IndexRecordOption, STORED, Schema, TantivyDocument, TextFieldIndexing,
     TextOptions, Value,
 };
 use tantivy::tokenizer::TextAnalyzer;
+use tantivy::tokenizer::{TokenStream, Tokenizer};
 use tantivy::{Index, IndexReader, IndexWriter, Term};
 
 use storage::RowId;
@@ -51,7 +52,6 @@ struct Fields {
 }
 
 pub struct LexicalIndex {
-    index: Index,
     writer: IndexWriter,
     reader: IndexReader,
     fields: Fields,
@@ -76,7 +76,6 @@ impl LexicalIndex {
             .map_err(tantivy_error)?;
         let reader = index.reader().map_err(tantivy_error)?;
         Ok(Self {
-            index,
             writer,
             reader,
             fields,
@@ -104,17 +103,9 @@ impl LexicalIndex {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let query_parser = QueryParser::for_index(
-            &self.index,
-            vec![
-                self.fields.symbol,
-                self.fields.signature,
-                self.fields.doc,
-                self.fields.file,
-                self.fields.body,
-            ],
-        );
-        let parsed = query_parser.parse_query(query).map_err(tantivy_error)?;
+        let Some(parsed) = self.build_query(query) else {
+            return Ok(Vec::new());
+        };
         let searcher = self.reader.searcher();
         let top_docs = searcher
             .search(&parsed, &TopDocs::with_limit(limit))
@@ -136,6 +127,44 @@ impl LexicalIndex {
             });
         }
         Ok(rows)
+    }
+
+    fn build_query(&self, query: &str) -> Option<Box<dyn Query>> {
+        let mut tokenizer = CodeTokenizer::new();
+        let mut stream = tokenizer.token_stream(query);
+        let mut terms = Vec::new();
+        stream.process(&mut |token| {
+            if !terms.iter().any(|term: &String| term == &token.text) {
+                terms.push(token.text.clone());
+            }
+        });
+        if terms.is_empty() {
+            return None;
+        }
+
+        let fields = [
+            (self.fields.symbol, SYMBOL_BOOST),
+            (self.fields.signature, SIGNATURE_BOOST),
+            (self.fields.doc, DOC_BOOST),
+            (self.fields.body, BODY_BOOST),
+            (self.fields.file, FILE_BOOST),
+        ];
+        let clauses = terms
+            .iter()
+            .flat_map(|term| {
+                fields.iter().map(move |(field, boost)| {
+                    let term_query = TermQuery::new(
+                        tantivy::Term::from_field_text(*field, term),
+                        IndexRecordOption::WithFreqsAndPositions,
+                    );
+                    (
+                        Occur::Should,
+                        Box::new(BoostQuery::new(Box::new(term_query), *boost)) as Box<dyn Query>,
+                    )
+                })
+            })
+            .collect();
+        Some(Box::new(BooleanQuery::new(clauses)))
     }
 
     pub fn num_docs(&self) -> u64 {
@@ -259,5 +288,53 @@ mod tests {
         let results = index.search("unique1", 10).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].row, rows[1]);
+    }
+
+    #[test]
+    fn exact_identifier_spellings_rank_defining_chunk_first() {
+        let dir = tempdir().unwrap();
+        let mut store = ChunkStore::create(dir.path(), 1, "test").unwrap();
+        let records: Vec<_> = (0..6).map(record).collect();
+        let rows = store
+            .insert_batch(
+                &records
+                    .iter()
+                    .map(|record| (record.clone(), vec![f16::from_f32(0.0)]))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let mut docs = vec![LexicalDoc {
+            symbol: "normalize_timestamp".into(),
+            signature: "fn normalize_timestamp()".into(),
+            doc_first_line: Some("Defines timestamp normalization".into()),
+            file: "src/time.rs".into(),
+            body: "return normalized value".into(),
+        }];
+        docs.extend((0..5).map(|seed| LexicalDoc {
+            symbol: format!("caller{seed}"),
+            signature: format!("fn caller{seed}()"),
+            doc_first_line: None,
+            file: format!("src/caller{seed}.rs"),
+            body: "normalize value".into(),
+        }));
+
+        let mut index = LexicalIndex::open(dir.path()).unwrap();
+        index
+            .add_batch(&rows.iter().copied().zip(docs).collect::<Vec<_>>())
+            .unwrap();
+        index.commit().unwrap();
+
+        for query in [
+            "normalize_timestamp",
+            "normalizeTimestamp",
+            "normalize timestamp",
+        ] {
+            let results = index.search(query, 6).unwrap();
+            assert_eq!(
+                results.first().map(|result| result.row),
+                Some(rows[0]),
+                "{query}"
+            );
+        }
     }
 }
