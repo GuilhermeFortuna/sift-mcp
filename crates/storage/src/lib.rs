@@ -8,4 +8,4 @@ mod store;
 pub use error::StoreError;
 pub use matrix::{EmbeddingMatrix, MatrixHeader, MATRIX_FORMAT_VERSION};
 pub use record::{ChunkRecord, ContentHash, RowId};
-pub use store::{ChunkStore, CompactionReport, Integrity, StoreStats};
+pub use store::{ChunkStore, CompactionReport, Integrity, StoreStats, SCHEMA_VERSION};
