@@ -67,6 +67,50 @@ impl ChunkStore {
         self.matrix.as_mut().expect("matrix present")
     }
 
+    /// Drop trailing matrix rows that have no metadata (crash recovery).
+    fn reclaim_trailing_orphans(&mut self) -> Result<(), StoreError> {
+        let meta_count: u64 = self.conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| {
+            r.get::<_, i64>(0).map(|v| v as u64)
+        })?;
+        let max_rowid: Option<u64> = self
+            .conn
+            .query_row("SELECT MAX(rowid) FROM chunks", [], |r| {
+                r.get::<_, Option<i64>>(0)
+            })?
+            .map(|v| v as u64);
+
+        let expected_rows = match max_rowid {
+            None => 0,
+            Some(max) => max + 1,
+        };
+        // Only reclaim when metadata is a dense prefix 0..expected_rows-1.
+        if meta_count != expected_rows {
+            return Ok(());
+        }
+        let matrix_rows = self.matrix_ref().rows();
+        if matrix_rows <= expected_rows {
+            return Ok(());
+        }
+        // Confirm every id in 0..expected_rows exists.
+        for i in 0..expected_rows {
+            let n: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM chunks WHERE rowid = ?1",
+                params![i as i64],
+                |r| r.get(0),
+            )?;
+            if n != 1 {
+                return Ok(());
+            }
+        }
+        let mut header = self.matrix_ref().header().clone();
+        header.rows = expected_rows;
+        let path = self.matrix_ref().path().to_path_buf();
+        self.matrix = None;
+        EmbeddingMatrix::rewrite_header_on_disk(&path, &header)?;
+        self.matrix = Some(EmbeddingMatrix::open_mut(&path)?);
+        Ok(())
+    }
+
     pub fn create(dir: &Path, dims: u32, model_id: &str) -> Result<Self, StoreError> {
         std::fs::create_dir_all(dir)?;
         let db_path = dir.join(DB_NAME);
@@ -104,14 +148,16 @@ impl ChunkStore {
             });
         }
         let matrix = EmbeddingMatrix::open_mut(&matrix_path)?;
-        let store = Self {
+        let mut store = Self {
             dir: dir.to_path_buf(),
             conn,
             matrix: Some(matrix),
             statements_prepared: std::cell::Cell::new(0),
             fail_before_commit: false,
         };
-        // Opening with disagreeing halves fails loudly.
+        // A crash after matrix append but before metadata commit leaves trailing
+        // orphan rows. Truncate them on open so the store needs no manual repair.
+        store.reclaim_trailing_orphans()?;
         match store.verify()? {
             Integrity::Ok { .. } => Ok(store),
             broken @ Integrity::Broken { .. } => Err(StoreError::Corrupt(broken)),
