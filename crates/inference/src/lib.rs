@@ -157,6 +157,24 @@ mod fixture_tests {
     }
 
     #[test]
+    fn primary_reference_fixture_is_structurally_valid() {
+        let path = fixture_path("primary-reference.json");
+        let json = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let fixture = validate_reference_fixture(&json).expect("primary fixture must validate");
+        assert_eq!(fixture.dims, 1024);
+        assert_eq!(fixture.cases.len(), REQUIRED_CASES.len());
+        for case in &fixture.cases {
+            assert_eq!(case.vector.len(), fixture.dims as usize);
+            assert!(
+                !case.tokens.is_empty(),
+                "case {} must pin a token sequence",
+                case.name
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "requires CUDA hardware and ONNX Runtime"]
     fn gpu_inference_is_only_meaningful_with_hardware() {
         panic!("GPU inference tests are only meaningful with CUDA hardware and ONNX Runtime");
