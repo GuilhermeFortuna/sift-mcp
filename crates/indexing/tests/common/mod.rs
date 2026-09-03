@@ -73,38 +73,45 @@ impl TempRepo {
         // Disable gpg signing for test commits.
         git(dir.path(), &["config", "commit.gpgsign", "false"]);
 
+        let mut repo = Self { dir };
         for commit in commits {
-            for path in &commit.deletes {
-                let full = dir.path().join(path);
-                if full.exists() {
-                    fs::remove_file(&full).expect("delete file");
-                }
-                git(dir.path(), &["rm", "--quiet", "--ignore-unmatch", "-f", path]);
-            }
-            for (from, to) in &commit.renames {
-                let from_full = dir.path().join(from);
-                let to_full = dir.path().join(to);
-                if let Some(parent) = to_full.parent() {
-                    fs::create_dir_all(parent).expect("mkdir rename dest");
-                }
-                fs::rename(&from_full, &to_full).expect("rename file");
-                git(dir.path(), &["add", "-A"]);
-            }
-            for file in &commit.files {
-                let full = dir.path().join(&file.path);
-                if let Some(parent) = full.parent() {
-                    fs::create_dir_all(parent).expect("mkdir");
-                }
-                fs::write(&full, &file.contents).expect("write file");
-                git(dir.path(), &["add", "--", &file.path]);
+            repo.apply_commit(commit);
+        }
+        repo
+    }
+
+    pub fn apply_commit(&self, commit: &CommitSpec) {
+        for path in &commit.deletes {
+            let full = self.dir.path().join(path);
+            if full.exists() {
+                fs::remove_file(&full).expect("delete file");
             }
             git(
-                dir.path(),
-                &["commit", "--allow-empty", "-m", &commit.message],
+                self.dir.path(),
+                &["rm", "--quiet", "--ignore-unmatch", "-f", path],
             );
         }
-
-        Self { dir }
+        for (from, to) in &commit.renames {
+            let from_full = self.dir.path().join(from);
+            let to_full = self.dir.path().join(to);
+            if let Some(parent) = to_full.parent() {
+                fs::create_dir_all(parent).expect("mkdir rename dest");
+            }
+            fs::rename(&from_full, &to_full).expect("rename file");
+            git(self.dir.path(), &["add", "-A"]);
+        }
+        for file in &commit.files {
+            let full = self.dir.path().join(&file.path);
+            if let Some(parent) = full.parent() {
+                fs::create_dir_all(parent).expect("mkdir");
+            }
+            fs::write(&full, &file.contents).expect("write file");
+            git(self.dir.path(), &["add", "--", &file.path]);
+        }
+        git(
+            self.dir.path(),
+            &["commit", "--allow-empty", "-m", &commit.message],
+        );
     }
 
     pub fn path(&self) -> &Path {
@@ -131,6 +138,7 @@ impl TempRepo {
         String::from_utf8(out).expect("utf8").trim().to_string()
     }
 
+    #[allow(dead_code)]
     pub fn commit_at(&self, rev: &str) -> String {
         let out = git_output(self.dir.path(), &["rev-parse", rev]);
         String::from_utf8(out).expect("utf8").trim().to_string()
