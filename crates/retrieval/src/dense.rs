@@ -75,20 +75,45 @@ impl DenseIndex {
         live: &LiveMask,
         backend: DenseBackend,
     ) -> Result<Self, RetrievalError> {
-        if matrix.rows() as usize != live.len() {
+        Self::prepare_slice(
+            matrix.as_slice(),
+            matrix.rows(),
+            matrix.dims(),
+            matrix.model_id(),
+            live,
+            backend,
+        )
+    }
+
+    pub fn prepare_slice(
+        matrix: &[f16],
+        rows: u64,
+        dims: u32,
+        model_id: &str,
+        live: &LiveMask,
+        backend: DenseBackend,
+    ) -> Result<Self, RetrievalError> {
+        if rows as usize != live.len() {
             return Err(RetrievalError::Dense(format!(
                 "live mask has {} rows but matrix has {}",
                 live.len(),
-                matrix.rows()
+                rows
+            )));
+        }
+        if matrix.len() != rows as usize * dims as usize {
+            return Err(RetrievalError::Dense(format!(
+                "matrix has {} values but shape {rows}x{dims} requires {}",
+                matrix.len(),
+                rows as usize * dims as usize
             )));
         }
         let (prepared, backend) = match backend {
-            DenseBackend::Cpu => (matrix.as_slice().to_vec(), PreparedBackend::Cpu),
+            DenseBackend::Cpu => (matrix.to_vec(), PreparedBackend::Cpu),
             DenseBackend::Cuda => {
                 #[cfg(feature = "cuda")]
                 {
                     let mut scorer = inference::CudaDenseScorer::new()?;
-                    scorer.prepare(matrix.as_slice(), matrix.rows(), matrix.dims())?;
+                    scorer.prepare(matrix, rows, dims)?;
                     (Vec::new(), PreparedBackend::Cuda(Mutex::new(Box::new(scorer))))
                 }
                 #[cfg(not(feature = "cuda"))]
@@ -113,9 +138,9 @@ impl DenseIndex {
         Ok(Self {
             uploaded_bytes,
             matrix: prepared,
-            rows: matrix.rows(),
-            dims: matrix.dims(),
-            model_id: matrix.model_id().to_owned(),
+            rows,
+            dims,
+            model_id: model_id.to_owned(),
             live: live.clone(),
             backend,
         })
@@ -304,6 +329,12 @@ impl LiveMask {
 
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
+    }
+
+    pub fn all_live(rows: u64) -> Self {
+        Self {
+            rows: vec![true; rows as usize],
+        }
     }
 
     #[cfg(test)]
