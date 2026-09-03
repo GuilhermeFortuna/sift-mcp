@@ -33,10 +33,10 @@ differs from the pin.
 Practical truncation length used by the export and fixture: **512** tokens.
 Pooling and L2 normalization are **not** baked into the ONNX graph.
 
-| Key | Dims | Pooling | Query prefix | Document prefix |
-| --- | --- | --- | --- | --- |
-| `primary` | 1024 | `last_token` | instruction template (see metadata) | none |
-| `fallback` | 768 | `mean` | none | none |
+| Key | Dims | Pooling | Query prefix | Document prefix | ONNX opset |
+| --- | --- | --- | --- | --- | --- |
+| `primary` | 1024 | `last_token` | instruction template (see metadata) | none | **18** (see notes) |
+| `fallback` | 768 | `mean` | none | none | 17 |
 
 ## Commands
 
@@ -60,17 +60,30 @@ against the committed reference fixtures in
 
 | Path | Committed? |
 | --- | --- |
-| `models/<key>/model.onnx` | No |
+| `models/<key>/model.onnx` (+ optional `.onnx.data`) | No |
 | `models/<key>/tokenizer*` | No |
-| `models/<key>/metadata.json` | No (hashes recorded here after export) |
+| `models/<key>/metadata.json` | No |
+| `tools/artifact-hashes.json` | Yes (expected SHA-256 after a verified export) |
 | `crates/inference/fixtures/<key>-reference.json` | Yes |
 | `tools/fixture_inputs.json` | Yes |
 
 Obtain artifacts by running the export commands above on a machine with the
-pinned Python deps and Hugging Face access. Content hashes in `metadata.json`
-must match what verification used.
+pinned Python deps and Hugging Face access. Content hashes in
+`tools/artifact-hashes.json` must match `metadata.json` after export.
 
 ## Primary export notes
 
-Filled in during export: rotary-embedding / last-token-pooling workarounds, or
-abandonment and that the fallback fixture is the SIFT-005 target.
+- Torch 2.14's dynamo ONNX exporter emits **opset 18** for Qwen3 and fails to
+  down-convert to 17 (`axes` attribute assertion in the ONNX C version
+  converter). The classic TorchScript exporter (`dynamo=False`) aborts with
+  `unordered_map::at` on rotary attention. We keep the dynamo graph at opset 18
+  and record the actual opset in metadata.
+- Last-token pooling is **not** baked into the graph. Verification and the
+  future Rust runtime must use **left padding** for the primary model so the
+  final position is content, then take the last non-pad hidden state and L2-
+  normalize.
+- Query instruction prefix is recorded in metadata / applied by verify when
+  `role == "query"`; documents stay unprefixed.
+- Both primary and fallback fixtures verified within tolerance; **SIFT-005
+  should target `primary-reference.json`**, with `fallback-reference.json` as
+  the alternate oracle.

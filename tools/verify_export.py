@@ -86,7 +86,13 @@ def _encode_batch(
     tokenizer: Any,
     texts: list[str],
     max_length: int,
+    pooling: str,
 ) -> dict[str, Any]:
+    # last_token pooling needs left padding so the final position is content.
+    if pooling == "last_token":
+        tokenizer.padding_side = "left"
+    else:
+        tokenizer.padding_side = "right"
     return tokenizer(
         texts,
         return_tensors="pt",
@@ -109,7 +115,7 @@ def framework_embed_batch(
     dtype = torch.float32 if dtype_name == "fp32" else torch.float16
     model = model.to(dtype=dtype)
     model.eval()
-    encoded = _encode_batch(tokenizer, texts, max_length)
+    encoded = _encode_batch(tokenizer, texts, max_length, pooling)
     input_ids = encoded["input_ids"]
     attention_mask = encoded["attention_mask"]
     with torch.inference_mode():
@@ -139,7 +145,7 @@ def onnx_embed_batch(
     max_length: int,
     pooling: str,
 ) -> list[np.ndarray]:
-    encoded = _encode_batch(tokenizer, texts, max_length)
+    encoded = _encode_batch(tokenizer, texts, max_length, pooling)
     input_ids = encoded["input_ids"].cpu().numpy().astype(np.int64)
     attention_mask = encoded["attention_mask"].cpu().numpy().astype(np.int64)
     outputs = session.run(
@@ -216,7 +222,7 @@ def verify(
         torch.cuda.empty_cache()
         model_cuda = model.to(device="cuda", dtype=torch.float16)
         model_cuda.eval()
-        encoded = _encode_batch(tokenizer, texts, max_length)
+        encoded = _encode_batch(tokenizer, texts, max_length, pooling)
         encoded = {k: v.to("cuda") for k, v in encoded.items()}
         with torch.inference_mode():
             _ = model_cuda(**encoded)

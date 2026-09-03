@@ -182,6 +182,9 @@ def _export_onnx(
 
     out_onnx.parent.mkdir(parents=True, exist_ok=True)
     with torch.inference_mode():
+        # Torch 2.14's dynamo exporter may emit opset 18 and fail to down-convert
+        # to 17 for rotary-heavy graphs (Qwen3). We record the actual opset from
+        # the written file in metadata rather than claiming 17 blindly.
         torch.onnx.export(
             wrapped,
             (input_ids, attention_mask),
@@ -221,6 +224,16 @@ def assert_metadata_complete(meta: ExportMetadata) -> None:
             raise AssertionError(f"metadata field {key!r} must be str or null")
 
 
+def _read_onnx_opset(onnx_path: Path) -> int:
+    import onnx
+
+    model = onnx.load(str(onnx_path))
+    for imp in model.opset_import:
+        if imp.domain in ("", "ai.onnx"):
+            return int(imp.version)
+    raise RuntimeError(f"no default-domain opset in {onnx_path}")
+
+
 def export(model_key: str, out_dir: Path) -> ExportMetadata:
     if model_key not in MODEL_CONFIG:
         raise KeyError(f"unknown model key {model_key!r}; expected primary|fallback")
@@ -251,6 +264,7 @@ def export(model_key: str, out_dir: Path) -> ExportMetadata:
     onnx_data = model_out / "model.onnx.data"
     if onnx_data.exists():
         onnx_parts.append(onnx_data)
+    actual_opset = _read_onnx_opset(onnx_path)
     meta = ExportMetadata(
         model_id=f"{hf_id}@{revision}",
         revision=revision,
@@ -260,7 +274,7 @@ def export(model_key: str, out_dir: Path) -> ExportMetadata:
         normalize=str(cfg["normalize"]),
         query_prefix=cfg["query_prefix"],
         document_prefix=cfg["document_prefix"],
-        opset=17,
+        opset=actual_opset,
         precision="fp16",
         onnx_sha256=_sha256_paths(onnx_parts),
         tokenizer_sha256=_sha256_paths(tok_paths),
