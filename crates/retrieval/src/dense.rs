@@ -1,14 +1,25 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+#[cfg(feature = "cuda")]
+use std::sync::Mutex;
 
 use half::f16;
+#[cfg(feature = "cuda")]
+use inference::DenseScorer;
 use storage::{ChunkStore, RowId};
 use storage::EmbeddingMatrix;
 
 use crate::{RetrievalError, ScoredRow};
 
 pub enum DenseBackend {
+    Cuda,
     Cpu,
+}
+
+enum PreparedBackend {
+    Cpu,
+    #[cfg(feature = "cuda")]
+    Cuda(Mutex<Box<dyn DenseScorer>>),
 }
 
 pub struct DenseIndex {
@@ -17,7 +28,7 @@ pub struct DenseIndex {
     dims: u32,
     model_id: String,
     live: LiveMask,
-    backend: DenseBackend,
+    backend: PreparedBackend,
     uploaded_bytes: u64,
 }
 
@@ -71,9 +82,36 @@ impl DenseIndex {
                 matrix.rows()
             )));
         }
-        let prepared = matrix.as_slice().to_vec();
+        let (prepared, backend) = match backend {
+            DenseBackend::Cpu => (matrix.as_slice().to_vec(), PreparedBackend::Cpu),
+            DenseBackend::Cuda => {
+                #[cfg(feature = "cuda")]
+                {
+                    let mut scorer = inference::CudaDenseScorer::new()?;
+                    scorer.prepare(matrix.as_slice(), matrix.rows(), matrix.dims())?;
+                    (Vec::new(), PreparedBackend::Cuda(Mutex::new(Box::new(scorer))))
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    return Err(RetrievalError::Dense(
+                        "CUDA backend requested but retrieval was built without the cuda feature"
+                            .into(),
+                    ));
+                }
+            }
+        };
+        let uploaded_bytes = match &backend {
+            PreparedBackend::Cpu => {
+                (prepared.len() * std::mem::size_of::<f16>()) as u64
+            }
+            #[cfg(feature = "cuda")]
+            PreparedBackend::Cuda(scorer) => scorer
+                .lock()
+                .map_err(|_| RetrievalError::Dense("CUDA scorer lock poisoned".into()))?
+                .uploaded_bytes(),
+        };
         Ok(Self {
-            uploaded_bytes: (prepared.len() * std::mem::size_of::<f16>()) as u64,
+            uploaded_bytes,
             matrix: prepared,
             rows: matrix.rows(),
             dims: matrix.dims(),
@@ -105,24 +143,42 @@ impl DenseIndex {
             return Ok(Vec::new());
         }
 
-        match self.backend {
-            DenseBackend::Cpu => self.search_cpu(query, limit),
+        match &self.backend {
+            PreparedBackend::Cpu => self.search_cpu(query, limit),
+            #[cfg(feature = "cuda")]
+            PreparedBackend::Cuda(scorer) => {
+                let scores = scorer
+                    .lock()
+                    .map_err(|_| RetrievalError::Dense("CUDA scorer lock poisoned".into()))?
+                    .score_all(query)?;
+                self.select_scores(scores.into_iter(), limit)
+            }
         }
     }
 
     fn search_cpu(&self, query: &[f16], limit: usize) -> Result<Vec<ScoredRow>, RetrievalError> {
         let dims = self.dims as usize;
+        let scores = self.matrix.chunks_exact(dims).map(|vector| {
+            vector
+                .iter()
+                .zip(query)
+                .map(|(value, query_value)| value.to_f32() * query_value.to_f32())
+                .sum::<f32>()
+        });
+        self.select_scores(scores, limit)
+    }
+
+    fn select_scores(
+        &self,
+        scores: impl IntoIterator<Item = f32>,
+        limit: usize,
+    ) -> Result<Vec<ScoredRow>, RetrievalError> {
         let mut top = BinaryHeap::with_capacity(limit.saturating_add(1));
-        for (row, vector) in self.matrix.chunks_exact(dims).enumerate() {
+        for (row, score) in scores.into_iter().enumerate() {
             let row = RowId::from_u64(row as u64);
             if !self.live.is_live(row) {
                 continue;
             }
-            let score = vector
-                .iter()
-                .zip(query)
-                .map(|(value, query_value)| value.to_f32() * query_value.to_f32())
-                .sum::<f32>();
             if !score.is_finite() {
                 return Err(RetrievalError::Dense(format!(
                     "non-finite score for row {}",
@@ -155,7 +211,16 @@ impl DenseIndex {
     }
 
     pub fn resident_bytes(&self) -> u64 {
-        (self.matrix.len() * std::mem::size_of::<f16>()) as u64
+        match &self.backend {
+            PreparedBackend::Cpu => {
+                (self.matrix.len() * std::mem::size_of::<f16>()) as u64
+            }
+            #[cfg(feature = "cuda")]
+            PreparedBackend::Cuda(scorer) => scorer
+                .lock()
+                .map(|scorer| scorer.resident_bytes())
+                .unwrap_or(0),
+        }
     }
 
     pub fn uploaded_bytes(&self) -> u64 {
@@ -196,8 +261,15 @@ impl DenseIndex {
 
         let old_values = self.rows as usize * self.dims as usize;
         let appended = &matrix.as_slice()[old_values..];
-        self.matrix.extend_from_slice(appended);
-        self.uploaded_bytes += (appended.len() * std::mem::size_of::<f16>()) as u64;
+        match &self.backend {
+            PreparedBackend::Cpu => self.matrix.extend_from_slice(appended),
+            #[cfg(feature = "cuda")]
+            PreparedBackend::Cuda(scorer) => scorer
+                .lock()
+                .map_err(|_| RetrievalError::Dense("CUDA scorer lock poisoned".into()))?
+                .append(appended)?,
+        }
+        self.uploaded_bytes += std::mem::size_of_val(appended) as u64;
         self.rows = matrix.rows();
         self.live = live.clone();
         Ok(())
@@ -572,6 +644,35 @@ mod tests {
         assert_eq!(
             index.uploaded_bytes() - uploaded_before,
             (100 * DIMS * std::mem::size_of::<f16>()) as u64
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires CUDA hardware and cuBLAS"]
+    fn cuda_matches_cpu() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cuda-parity.f16");
+        let mut matrix = EmbeddingMatrix::create(&path, 3, "model").unwrap();
+        for row in [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.5, 0.5, 0.0],
+            [-1.0, 0.0, 0.0],
+        ] {
+            matrix
+                .append(&row.map(f16::from_f32))
+                .expect("append fixture row");
+        }
+        let live = LiveMask::from_bits(vec![true, true, false, true, true]);
+        let cpu = DenseIndex::prepare(&matrix, &live, DenseBackend::Cpu).unwrap();
+        let cuda = DenseIndex::prepare(&matrix, &live, DenseBackend::Cuda).unwrap();
+        let query = [f16::ONE, f16::from_f32(0.5), f16::from_f32(-1.0)];
+
+        assert_eq!(
+            cuda.search(&query, "model", 4).unwrap(),
+            cpu.search(&query, "model", 4).unwrap()
         );
     }
 }

@@ -1,5 +1,8 @@
 #[derive(Debug, thiserror::Error)]
 pub enum RetrievalError {
+    #[error("inference error: {0}")]
+    Inference(#[from] inference::InferError),
+
     #[error("store error: {0}")]
     Store(#[from] storage::StoreError),
 
