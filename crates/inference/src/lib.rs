@@ -40,10 +40,7 @@ mod fixture_tests {
         InvalidJson(String),
         MissingField(&'static str),
         MissingCase(&'static str),
-        BadCase {
-            name: String,
-            reason: &'static str,
-        },
+        BadCase { name: String, reason: &'static str },
     }
 
     const REQUIRED_CASES: &[&str] = &[
@@ -68,7 +65,7 @@ mod fixture_tests {
         if fixture.tolerance.metric.is_empty() || fixture.tolerance.basis.is_empty() {
             return Err(FixtureError::MissingField("tolerance"));
         }
-        if !(fixture.tolerance.max > 0.0) {
+        if fixture.tolerance.max <= 0.0 {
             return Err(FixtureError::MissingField("tolerance.max"));
         }
 

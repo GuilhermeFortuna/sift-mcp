@@ -429,6 +429,8 @@ name = "inference"
 version = "0.1.0"
 dependencies = [
  "ort",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
