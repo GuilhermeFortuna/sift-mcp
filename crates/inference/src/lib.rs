@@ -4,11 +4,13 @@ pub mod embedder;
 pub mod metadata;
 pub mod mock;
 pub mod pooling;
+pub mod tokenize;
 
 pub use embedder::{Embedder, Embedding, InferError, Role};
 pub use metadata::{MetadataError, ModelMetadata, Normalize, Pooling};
 pub use mock::MockEmbedder;
 pub use pooling::{l2_normalize_rows, pool};
+pub use tokenize::TextTokenizer;
 
 #[cfg(test)]
 mod fixture_tests {
