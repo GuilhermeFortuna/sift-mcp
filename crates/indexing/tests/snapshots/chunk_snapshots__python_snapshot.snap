@@ -1,0 +1,11 @@
+---
+source: crates/indexing/tests/chunk_snapshots.rs
+assertion_line: 66
+expression: "snapshot_lines(\"sample.py\", Language::Python, source)"
+---
+free_function function 3:5
+documented function 8:10
+Tracker class 13:18
+Tracker::__init__ function 14:15
+Tracker::update function 17:18
+test_it_works function 21:22

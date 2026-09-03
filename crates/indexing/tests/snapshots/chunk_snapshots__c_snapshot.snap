@@ -1,0 +1,10 @@
+---
+source: crates/indexing/tests/chunk_snapshots.rs
+assertion_line: 114
+expression: "snapshot_lines(\"sample.c\", Language::C, source)"
+---
+free_function function 1:5
+documented function 7:11
+Tracker struct 13:15
+tracker_init function 17:19
+tracker_update function 21:23
