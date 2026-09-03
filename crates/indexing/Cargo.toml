@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 storage = { path = "../storage" }
 inference = { path = "../inference" }
+retrieval = { path = "../retrieval" }
 blake3 = { workspace = true }
 thiserror = { workspace = true }
 tree-sitter = { workspace = true }

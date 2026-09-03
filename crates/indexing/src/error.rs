@@ -21,6 +21,8 @@ pub enum IndexError {
     Store(#[from] storage::StoreError),
     #[error("inference error: {0}")]
     Infer(#[from] inference::InferError),
+    #[error("retrieval error: {0}")]
+    Retrieval(#[from] retrieval::RetrievalError),
     #[error("git error: {0}")]
     Git(String),
     #[error("io error: {0}")]
