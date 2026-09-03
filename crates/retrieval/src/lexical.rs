@@ -17,10 +17,15 @@ use storage::RowId;
 use crate::error::RetrievalError;
 use crate::tokenize::CodeTokenizer;
 
+/// BM25 boost applied to symbol-name matches.
 pub const SYMBOL_BOOST: f32 = 4.0;
+/// BM25 boost applied to signature matches.
 pub const SIGNATURE_BOOST: f32 = 3.0;
+/// BM25 boost applied to documentation matches.
 pub const DOC_BOOST: f32 = 2.0;
+/// BM25 boost applied to body matches.
 pub const BODY_BOOST: f32 = 1.0;
+/// BM25 boost applied to file-path matches.
 pub const FILE_BOOST: f32 = 0.5;
 
 const INDEX_DIRECTORY: &str = "lexical";
@@ -36,6 +41,10 @@ pub struct LexicalDoc {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// A row ranked by raw, non-negative BM25 score.
+///
+/// Scores are unnormalized and are meaningful for ordering within one query;
+/// they are not comparable across different queries.
 pub struct ScoredRow {
     pub row: RowId,
     pub score: f32,
@@ -144,6 +153,11 @@ impl LexicalIndex {
         Ok(())
     }
 
+    /// Search with permissive lexical disjunction semantics.
+    ///
+    /// Results use Tantivy's raw BM25 score, including the field boosts above.
+    /// Scores are non-negative and unnormalized, so callers must not compare
+    /// scores across queries.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<ScoredRow>, RetrievalError> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -238,7 +252,7 @@ impl LexicalIndex {
     }
 
     pub fn num_docs(&self) -> u64 {
-        self.reader.searcher().num_docs() as u64
+        self.reader.searcher().num_docs()
     }
 }
 
