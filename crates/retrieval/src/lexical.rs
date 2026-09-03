@@ -108,7 +108,7 @@ impl LexicalIndex {
         };
         let searcher = self.reader.searcher();
         let top_docs = searcher
-            .search(&parsed, &TopDocs::with_limit(limit))
+            .search(&parsed, &TopDocs::with_limit(searcher.num_docs() as usize))
             .map_err(tantivy_error)?;
         let mut rows = Vec::with_capacity(top_docs.len());
         for (score, address) in top_docs {
@@ -126,6 +126,13 @@ impl LexicalIndex {
                 score,
             });
         }
+        rows.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.row.cmp(&right.row))
+        });
+        rows.truncate(limit);
         Ok(rows)
     }
 
@@ -493,5 +500,57 @@ mod tests {
         assert!(exact[0].score > 1.0);
         let common = index.search("common", 10).unwrap();
         assert!(common.windows(2).all(|pair| pair[0].score >= pair[1].score));
+    }
+
+    #[test]
+    fn equal_scores_are_ordered_by_row_id_across_merge() {
+        let dir = tempdir().unwrap();
+        let mut store = ChunkStore::create(dir.path(), 1, "test").unwrap();
+        let records: Vec<_> = (0..4).map(record).collect();
+        let rows = store
+            .insert_batch(
+                &records
+                    .iter()
+                    .map(|record| (record.clone(), vec![f16::from_f32(0.0)]))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let mut index = LexicalIndex::open(dir.path()).unwrap();
+        for row in rows.iter().rev() {
+            index
+                .add_batch(&[(
+                    *row,
+                    LexicalDoc {
+                        symbol: "same".into(),
+                        signature: "fn same()".into(),
+                        doc_first_line: None,
+                        file: "src/same.rs".into(),
+                        body: "same".into(),
+                    },
+                )])
+                .unwrap();
+            index.commit().unwrap();
+        }
+
+        let expected = rows.clone();
+        let before = index.search("same", 4).unwrap();
+        assert_eq!(
+            before.iter().map(|result| result.row).collect::<Vec<_>>(),
+            expected
+        );
+        let repeated = index.search("same", 4).unwrap();
+        assert_eq!(repeated, before);
+
+        let segment_ids: Vec<_> = index
+            .reader
+            .searcher()
+            .segment_readers()
+            .iter()
+            .map(|segment| segment.segment_id())
+            .collect();
+        index.writer.merge(&segment_ids).wait().unwrap();
+        index.reader.reload().unwrap();
+        let after = index.search("same", 4).unwrap();
+        assert_eq!(after, before);
     }
 }
