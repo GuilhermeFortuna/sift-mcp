@@ -337,4 +337,46 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn retrieves_punctuated_quoted_error_string() {
+        let dir = tempdir().unwrap();
+        let mut store = ChunkStore::create(dir.path(), 1, "test").unwrap();
+        let records: Vec<_> = (0..3).map(record).collect();
+        let rows = store
+            .insert_batch(
+                &records
+                    .iter()
+                    .map(|record| (record.clone(), vec![f16::from_f32(0.0)]))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let docs = vec![
+            LexicalDoc {
+                symbol: "network_error".into(),
+                signature: "fn network_error()".into(),
+                doc_first_line: Some("Handles connection reset by peer".into()),
+                file: "src/network.rs".into(),
+                body: "return connection reset by peer".into(),
+            },
+            LexicalDoc {
+                symbol: "other".into(),
+                signature: "fn other()".into(),
+                doc_first_line: None,
+                file: "src/other.rs".into(),
+                body: "connection retry".into(),
+            },
+            document(2),
+        ];
+        let mut index = LexicalIndex::open(dir.path()).unwrap();
+        index
+            .add_batch(&rows.iter().copied().zip(docs).collect::<Vec<_>>())
+            .unwrap();
+        index.commit().unwrap();
+
+        for query in ["connection reset by peer", "\"connection reset by peer\":"] {
+            let results = index.search(query, 3).unwrap();
+            assert_eq!(results.first().map(|result| result.row), Some(rows[0]), "{query}");
+        }
+    }
 }
