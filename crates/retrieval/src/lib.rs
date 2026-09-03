@@ -1,7 +1,7 @@
-mod error;
 pub mod dense;
 #[cfg(test)]
 mod dense_reference;
+mod error;
 pub mod lexical;
 pub mod tokenize;
 

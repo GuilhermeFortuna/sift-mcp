@@ -6,8 +6,8 @@ use std::sync::Mutex;
 use half::f16;
 #[cfg(feature = "cuda")]
 use inference::DenseScorer;
-use storage::{ChunkStore, RowId};
 use storage::EmbeddingMatrix;
+use storage::{ChunkStore, RowId};
 
 use crate::{RetrievalError, ScoredRow};
 
@@ -62,10 +62,7 @@ impl Ord for Candidate {
 }
 
 impl DenseIndex {
-    pub fn from_store(
-        store: &ChunkStore,
-        backend: DenseBackend,
-    ) -> Result<Self, RetrievalError> {
+    pub fn from_store(store: &ChunkStore, backend: DenseBackend) -> Result<Self, RetrievalError> {
         let live = LiveMask::from_store(store)?;
         Self::prepare(store.matrix(), &live, backend)
     }
@@ -114,7 +111,10 @@ impl DenseIndex {
                 {
                     let mut scorer = inference::CudaDenseScorer::new()?;
                     scorer.prepare(matrix, rows, dims)?;
-                    (Vec::new(), PreparedBackend::Cuda(Mutex::new(Box::new(scorer))))
+                    (
+                        Vec::new(),
+                        PreparedBackend::Cuda(Mutex::new(Box::new(scorer))),
+                    )
                 }
                 #[cfg(not(feature = "cuda"))]
                 {
@@ -126,9 +126,7 @@ impl DenseIndex {
             }
         };
         let uploaded_bytes = match &backend {
-            PreparedBackend::Cpu => {
-                (prepared.len() * std::mem::size_of::<f16>()) as u64
-            }
+            PreparedBackend::Cpu => (prepared.len() * std::mem::size_of::<f16>()) as u64,
             #[cfg(feature = "cuda")]
             PreparedBackend::Cuda(scorer) => scorer
                 .lock()
@@ -176,7 +174,7 @@ impl DenseIndex {
                     .lock()
                     .map_err(|_| RetrievalError::Dense("CUDA scorer lock poisoned".into()))?
                     .score_all(query)?;
-                self.select_scores(scores.into_iter(), limit)
+                self.select_scores(scores, limit)
             }
         }
     }
@@ -237,9 +235,7 @@ impl DenseIndex {
 
     pub fn resident_bytes(&self) -> u64 {
         match &self.backend {
-            PreparedBackend::Cpu => {
-                (self.matrix.len() * std::mem::size_of::<f16>()) as u64
-            }
+            PreparedBackend::Cpu => (self.matrix.len() * std::mem::size_of::<f16>()) as u64,
             #[cfg(feature = "cuda")]
             PreparedBackend::Cuda(scorer) => scorer
                 .lock()
@@ -351,8 +347,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{DenseBackend, DenseIndex, LiveMask};
-    use crate::dense_reference::reference_search;
     use crate::RetrievalError;
+    use crate::dense_reference::reference_search;
 
     fn record(index: u64) -> ChunkRecord {
         ChunkRecord {
@@ -402,9 +398,7 @@ mod tests {
     }
 
     fn normalized_vector(state: &mut u64, dims: usize) -> Vec<f32> {
-        let mut vector = (0..dims)
-            .map(|_| random_value(state))
-            .collect::<Vec<_>>();
+        let mut vector = (0..dims).map(|_| random_value(state)).collect::<Vec<_>>();
         let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
         for value in &mut vector {
             *value /= norm;
@@ -434,10 +428,7 @@ mod tests {
 
         for _ in 0..50 {
             let query_f32 = normalized_vector(&mut state, DIMS);
-            let query = query_f32
-                .into_iter()
-                .map(f16::from_f32)
-                .collect::<Vec<_>>();
+            let query = query_f32.into_iter().map(f16::from_f32).collect::<Vec<_>>();
             let reference_query = query.iter().map(|value| value.to_f32()).collect::<Vec<_>>();
             let expected = reference_search(&matrix_f32, &live, DIMS, &reference_query, 25);
             let actual = index.search(&query, "model", 25).unwrap();
@@ -502,7 +493,10 @@ mod tests {
                 .unwrap();
             let expected_rows = expected.iter().map(|result| result.row).collect::<Vec<_>>();
             let actual_rows = actual.iter().map(|result| result.row).collect::<Vec<_>>();
-            assert_eq!(actual_rows, expected_rows, "top-10 reordered in trial {trial}");
+            assert_eq!(
+                actual_rows, expected_rows,
+                "top-10 reordered in trial {trial}"
+            );
         }
     }
 
@@ -554,12 +548,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut store = ChunkStore::create(dir.path(), 1, "model").unwrap();
         let chunks = (0..10)
-            .map(|index| {
-                (
-                    record(index),
-                    vec![f16::from_f32((10 - index) as f32)],
-                )
-            })
+            .map(|index| (record(index), vec![f16::from_f32((10 - index) as f32)]))
             .collect::<Vec<_>>();
         let rows = store.insert_batch(&chunks).unwrap();
         store.tombstone(&[rows[0], rows[2], rows[4]]).unwrap();
@@ -571,10 +560,17 @@ mod tests {
             top_five.iter().map(|result| result.row).collect::<Vec<_>>(),
             [rows[1], rows[3], rows[5], rows[6], rows[7]]
         );
-        assert!(top_five.windows(2).all(|pair| pair[0].score >= pair[1].score));
+        assert!(
+            top_five
+                .windows(2)
+                .all(|pair| pair[0].score >= pair[1].score)
+        );
         assert_eq!(index.search(&query, "model", 2).unwrap().len(), 2);
         assert_eq!(index.search(&query, "model", 100).unwrap().len(), 7);
         assert!(index.search(&query, "model", 0).unwrap().is_empty());
+        for result in top_five {
+            assert!(store.get(result.row).unwrap().is_some());
+        }
     }
 
     #[test]

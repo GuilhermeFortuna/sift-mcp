@@ -1,7 +1,7 @@
 use storage::RowId;
 
-use crate::dense::LiveMask;
 use crate::ScoredRow;
+use crate::dense::LiveMask;
 
 pub fn reference_search(
     matrix_f32: &[f32],

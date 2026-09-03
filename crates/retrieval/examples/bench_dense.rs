@@ -69,9 +69,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let dims = embedder.as_ref().map_or(1024, Embedder::dims);
-    let model_id = embedder
-        .as_ref()
-        .map_or_else(|| "bench-dense".to_owned(), |model| model.model_id().to_owned());
+    let model_id = embedder.as_ref().map_or_else(
+        || "bench-dense".to_owned(),
+        |model| model.model_id().to_owned(),
+    );
     let value = f16::from_f32(1.0 / (dims as f32).sqrt());
     let query = vec![value; dims as usize];
 
@@ -80,14 +81,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let live = LiveMask::all_live(rows);
         let gpu_before = report_vram.then(gpu_used_bytes).flatten();
         let prepare_started = Instant::now();
-        let index = DenseIndex::prepare_slice(
-            &matrix,
-            rows,
-            dims,
-            &model_id,
-            &live,
-            DenseBackend::Cuda,
-        )?;
+        let index =
+            DenseIndex::prepare_slice(&matrix, rows, dims, &model_id, &live, DenseBackend::Cuda)?;
         let prepare_ms = prepare_started.elapsed().as_secs_f64() * 1_000.0;
         drop(matrix);
 
@@ -111,7 +106,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if report_vram {
             let gpu_after = gpu_used_bytes();
-            println!("rows={rows} dense_resident_bytes={}", index.resident_bytes());
+            println!(
+                "rows={rows} dense_resident_bytes={}",
+                index.resident_bytes()
+            );
             match (gpu_before, gpu_after) {
                 (Some(before), Some(after)) => println!(
                     "rows={rows} gpu_used_before_bytes={before} gpu_used_after_bytes={after} dense_attributable_bytes={} usable_budget_bytes={}",
