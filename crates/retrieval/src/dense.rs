@@ -314,4 +314,42 @@ mod tests {
 
         assert_eq!(results[0].row, rows[1]);
     }
+
+    fn assert_f16_top_k_stability(trials: usize) {
+        const ROWS: usize = 128;
+        const DIMS: usize = 64;
+        let dir = TempDir::new().unwrap();
+        let mut state = 0xd3a5_e008_5eed_u64;
+        for trial in 0..trials {
+            let path = dir.path().join(format!("precision-{trial}.f16"));
+            let mut matrix = EmbeddingMatrix::create(&path, DIMS as u32, "model").unwrap();
+            let mut full_precision = Vec::with_capacity(ROWS * DIMS);
+            for _ in 0..ROWS {
+                let row = normalized_vector(&mut state, DIMS);
+                matrix
+                    .append(&row.iter().copied().map(f16::from_f32).collect::<Vec<_>>())
+                    .unwrap();
+                full_precision.extend(row);
+            }
+            let query = normalized_vector(&mut state, DIMS)
+                .into_iter()
+                .map(f16::from_f32)
+                .collect::<Vec<_>>();
+            let query_f32 = query.iter().map(|value| value.to_f32()).collect::<Vec<_>>();
+            let live = LiveMask::from_bits(vec![true; ROWS]);
+            let expected = reference_search(&full_precision, &live, DIMS, &query_f32, 10);
+            let actual = DenseIndex::prepare(&matrix, &live, DenseBackend::Cpu)
+                .unwrap()
+                .search(&query, "model", 10)
+                .unwrap();
+            let expected_rows = expected.iter().map(|result| result.row).collect::<Vec<_>>();
+            let actual_rows = actual.iter().map(|result| result.row).collect::<Vec<_>>();
+            assert_eq!(actual_rows, expected_rows, "top-10 reordered in trial {trial}");
+        }
+    }
+
+    #[test]
+    fn f16_storage_preserves_full_precision_top_ten() {
+        assert_f16_top_k_stability(200);
+    }
 }
