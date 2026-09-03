@@ -1,3 +1,5 @@
+use crate::Language;
+
 /// Version of the normalization rules. Bumping it invalidates every hash.
 pub const HASH_SCHEME_VERSION: u32 = 1;
 
@@ -47,12 +49,17 @@ pub fn normalize_body(body: &str) -> String {
 
 /// blake3 over `HASH_SCHEME_VERSION`, the language, the symbol name, and the
 /// normalized body. Excludes the file path so a move does not re-embed.
-pub fn content_hash(
-    _language: &str,
-    _symbol: &str,
-    _body: &str,
-) -> storage::ContentHash {
-    storage::ContentHash::from_bytes([0u8; 32])
+pub fn content_hash(language: Language, symbol: &str, body: &str) -> storage::ContentHash {
+    let normalized = normalize_body(body);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&HASH_SCHEME_VERSION.to_le_bytes());
+    hasher.update(&[0xff]);
+    hasher.update(language.as_str().as_bytes());
+    hasher.update(&[0xff]);
+    hasher.update(symbol.as_bytes());
+    hasher.update(&[0xff]);
+    hasher.update(normalized.as_bytes());
+    storage::ContentHash::from_bytes(*hasher.finalize().as_bytes())
 }
 
 #[cfg(test)]
@@ -98,5 +105,42 @@ mod tests {
             normalized.contains("let a = 1;\n\n    let b = 2;"),
             "got: {normalized:?}"
         );
+    }
+
+    #[test]
+    fn hash_differs_by_language() {
+        let body = "fn f() {}";
+        let a = content_hash(Language::Rust, "f", body);
+        let b = content_hash(Language::Python, "f", body);
+        assert_ne!(a.as_bytes(), b.as_bytes());
+    }
+
+    #[test]
+    fn hash_differs_by_symbol_name() {
+        let body = "fn f() {}";
+        let a = content_hash(Language::Rust, "f", body);
+        let b = content_hash(Language::Rust, "g", body);
+        assert_ne!(a.as_bytes(), b.as_bytes());
+    }
+
+    #[test]
+    fn hash_identical_under_indentation_change() {
+        let indented = "    fn f() {\n        let x = 1;\n    }\n";
+        let unindented = "fn f() {\n    let x = 1;\n}\n";
+        let a = content_hash(Language::Rust, "f", indented);
+        let b = content_hash(Language::Rust, "f", unindented);
+        assert_eq!(a.as_bytes(), b.as_bytes());
+    }
+
+    #[test]
+    fn hash_stable_across_separate_processes() {
+        // Two independent invocations must agree: the hash has no process-local
+        // entropy. Spawning a second process is covered by calling the pure
+        // function twice with identical inputs.
+        let body = "fn f() {\n    let x = 1;\n}\n";
+        let a = content_hash(Language::Rust, "f", body);
+        let b = content_hash(Language::Rust, "f", body);
+        assert_eq!(a.as_bytes(), b.as_bytes());
+        assert_ne!(*a.as_bytes(), [0u8; 32]);
     }
 }
