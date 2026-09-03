@@ -376,7 +376,11 @@ mod tests {
 
         for query in ["connection reset by peer", "\"connection reset by peer\":"] {
             let results = index.search(query, 3).unwrap();
-            assert_eq!(results.first().map(|result| result.row), Some(rows[0]), "{query}");
+            assert_eq!(
+                results.first().map(|result| result.row),
+                Some(rows[0]),
+                "{query}"
+            );
         }
     }
 
@@ -423,8 +427,71 @@ mod tests {
             .unwrap();
         index.commit().unwrap();
 
-        insta::assert_debug_snapshot!("decoder_timestamps", index.search("decoder timestamps", 4).unwrap());
-        insta::assert_debug_snapshot!("regressing_timestamps", index.search("regressing timestamps", 4).unwrap());
-        insta::assert_debug_snapshot!("monotonic_order", index.search("monotonic order", 4).unwrap());
+        insta::assert_debug_snapshot!(
+            "decoder_timestamps",
+            index.search("decoder timestamps", 4).unwrap()
+        );
+        insta::assert_debug_snapshot!(
+            "regressing_timestamps",
+            index.search("regressing timestamps", 4).unwrap()
+        );
+        insta::assert_debug_snapshot!(
+            "monotonic_order",
+            index.search("monotonic order", 4).unwrap()
+        );
+    }
+
+    #[test]
+    fn handles_empty_queries_limits_and_raw_scores() {
+        let dir = tempdir().unwrap();
+        let mut store = ChunkStore::create(dir.path(), 1, "test").unwrap();
+        let records: Vec<_> = (0..3).map(record).collect();
+        let rows = store
+            .insert_batch(
+                &records
+                    .iter()
+                    .map(|record| (record.clone(), vec![f16::from_f32(0.0)]))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let docs = vec![
+            LexicalDoc {
+                symbol: "exact_symbol".into(),
+                signature: "fn exact_symbol()".into(),
+                doc_first_line: None,
+                file: "src/exact.rs".into(),
+                body: "other".into(),
+            },
+            LexicalDoc {
+                symbol: "other1".into(),
+                signature: "fn other1()".into(),
+                doc_first_line: None,
+                file: "src/other1.rs".into(),
+                body: "common".into(),
+            },
+            LexicalDoc {
+                symbol: "other2".into(),
+                signature: "fn other2()".into(),
+                doc_first_line: None,
+                file: "src/other2.rs".into(),
+                body: "common common".into(),
+            },
+        ];
+        let mut index = LexicalIndex::open(dir.path()).unwrap();
+        index
+            .add_batch(&rows.iter().copied().zip(docs).collect::<Vec<_>>())
+            .unwrap();
+        index.commit().unwrap();
+
+        assert!(index.search("!!! :::", 10).unwrap().is_empty());
+        assert!(index.search("exact_symbol", 0).unwrap().is_empty());
+        let results = index.search("common", 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].score > 0.0);
+        let exact = index.search("exact_symbol", 10).unwrap();
+        assert_eq!(exact.first().map(|result| result.row), Some(rows[0]));
+        assert!(exact[0].score > 1.0);
+        let common = index.search("common", 10).unwrap();
+        assert!(common.windows(2).all(|pair| pair[0].score >= pair[1].score));
     }
 }
