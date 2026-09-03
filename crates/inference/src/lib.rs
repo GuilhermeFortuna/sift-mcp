@@ -1,11 +1,13 @@
 //! Inference crate — batched embedding behind [`Embedder`].
 
+pub mod artifacts;
 pub mod embedder;
 pub mod metadata;
 pub mod mock;
 pub mod pooling;
 pub mod tokenize;
 
+pub use artifacts::verify_model_dir;
 pub use embedder::{Embedder, Embedding, InferError, Role};
 pub use metadata::{MetadataError, ModelMetadata, Normalize, Pooling};
 pub use mock::MockEmbedder;
