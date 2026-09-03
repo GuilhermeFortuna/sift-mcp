@@ -195,6 +195,7 @@ mod tests {
 
     use super::{DenseBackend, DenseIndex, LiveMask};
     use crate::dense_reference::reference_search;
+    use crate::RetrievalError;
 
     fn record(index: u64) -> ChunkRecord {
         ChunkRecord {
@@ -351,5 +352,43 @@ mod tests {
     #[test]
     fn f16_storage_preserves_full_precision_top_ten() {
         assert_f16_top_k_stability(200);
+    }
+
+    #[test]
+    fn search_refuses_wrong_width_with_distinguishable_error() {
+        let dir = TempDir::new().unwrap();
+        let matrix = EmbeddingMatrix::create(&dir.path().join("matrix.f16"), 4, "model").unwrap();
+        let live = LiveMask::from_bits(Vec::new());
+        let index = DenseIndex::prepare(&matrix, &live, DenseBackend::Cpu).unwrap();
+
+        let error = index
+            .search(&[f16::ZERO; 5], "model", 1)
+            .expect_err("wrong-width query must be refused");
+        assert!(matches!(
+            error,
+            RetrievalError::DimensionMismatch {
+                expected: 4,
+                got: 5
+            }
+        ));
+    }
+
+    #[test]
+    fn search_refuses_wrong_model_with_distinguishable_error() {
+        let dir = TempDir::new().unwrap();
+        let matrix = EmbeddingMatrix::create(&dir.path().join("matrix.f16"), 4, "model-a").unwrap();
+        let live = LiveMask::from_bits(Vec::new());
+        let index = DenseIndex::prepare(&matrix, &live, DenseBackend::Cpu).unwrap();
+
+        let error = index
+            .search(&[f16::ZERO; 4], "model-b", 1)
+            .expect_err("foreign-model query must be refused");
+        match error {
+            RetrievalError::ModelMismatch { expected, got } => {
+                assert_eq!(expected, "model-a");
+                assert_eq!(got, "model-b");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 }
