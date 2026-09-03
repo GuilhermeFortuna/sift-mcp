@@ -10,3 +10,7 @@ cuda = ["dep:ort"]
 
 [dependencies]
 ort = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
