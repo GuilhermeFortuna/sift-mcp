@@ -139,3 +139,60 @@ fn noop_reindex_embeds_nothing() {
     assert_eq!(second.chunks_removed, 0);
     assert_eq!(indexer.store().stats().unwrap().live, live);
 }
+
+#[test]
+fn lexical_index_tracks_pipeline_lifecycle() {
+    let h = Harness::new(&[CommitSpec::new("init")
+        .file("a.rs", sample_fn("alpha_scarlet"))
+        .file("b.rs", sample_fn("beta_cobalt"))]);
+    let mut indexer = h.indexer(IndexConfig {
+        compact_threshold: 0.20,
+        ..IndexConfig::default()
+    });
+    indexer.index_all(&mut NullProgress).unwrap();
+
+    let alpha_rows = indexer.store().rows_for_file("a.rs").unwrap();
+    let alpha_hits = indexer.lexical().search("alpha_scarlet", 10).unwrap();
+    assert_eq!(alpha_hits.first().map(|hit| hit.row), Some(alpha_rows[0]));
+
+    h.repo
+        .apply_commit(&CommitSpec::new("rename").rename("a.rs", "renamed.rs"));
+    indexer.update(&mut NullProgress).unwrap();
+    let renamed_rows = indexer.store().rows_for_file("renamed.rs").unwrap();
+    assert_eq!(renamed_rows, alpha_rows);
+    let renamed_hits = indexer.lexical().search("renamed.rs", 10).unwrap();
+    assert_eq!(renamed_hits[0].row, alpha_rows[0]);
+
+    h.repo
+        .apply_commit(&CommitSpec::new("delete").delete("b.rs"));
+    let delete_report = indexer.update(&mut NullProgress).unwrap();
+    let compaction = delete_report
+        .compacted
+        .as_ref()
+        .expect("deleting one of two rows should compact at this threshold");
+    assert_eq!(compaction.row_mapping.len(), 1);
+    assert_eq!(compaction.row_mapping[0].0.get(), 1);
+    assert_eq!(compaction.row_mapping[0].1.get(), 0);
+    assert!(
+        indexer
+            .lexical()
+            .search("beta_cobalt", 10)
+            .unwrap()
+            .is_empty()
+    );
+    let returned_rows = indexer
+        .lexical()
+        .search("alpha_scarlet", 10)
+        .unwrap()
+        .into_iter()
+        .map(|result| result.row)
+        .collect::<Vec<_>>();
+    assert!(
+        indexer
+            .store()
+            .get_many(&returned_rows)
+            .unwrap()
+            .into_iter()
+            .all(|record| record.is_some())
+    );
+}

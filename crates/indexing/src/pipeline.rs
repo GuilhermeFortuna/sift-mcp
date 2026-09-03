@@ -10,6 +10,7 @@ use std::time::Instant;
 use crossbeam_channel::bounded;
 use inference::{Embedder, Role};
 use rayon::prelude::*;
+use retrieval::{LexicalDoc, LexicalIndex};
 use storage::{ChunkRecord, ChunkStore, CompactionReport, ContentHash, Integrity, RowId};
 
 use crate::chunker::Chunker;
@@ -108,6 +109,7 @@ impl Progress for NullProgress {
 
 pub struct Indexer<'a> {
     store: ChunkStore,
+    lexical: LexicalIndex,
     embedder: &'a dyn Embedder,
     repo: PathBuf,
     git: RepoGit,
@@ -143,10 +145,20 @@ impl<'a> Indexer<'a> {
         config: IndexConfig,
     ) -> Result<Self, IndexError> {
         store.require_model(embedder.model_id())?;
+        let live = store.stats()?.live;
+        let lexical = LexicalIndex::open(store.dir())?;
+        let indexed = lexical.num_docs();
+        if live != indexed {
+            return Err(IndexError::LexicalOutOfSync {
+                store_live: live,
+                indexed,
+            });
+        }
         let git = RepoGit::open(repo)?;
         let exclusions = Exclusions::for_repository(repo)?;
         Ok(Self {
             store,
+            lexical,
             embedder,
             repo: repo.to_path_buf(),
             git,
@@ -165,8 +177,16 @@ impl<'a> Indexer<'a> {
         &mut self.store
     }
 
+    pub fn lexical(&self) -> &LexicalIndex {
+        &self.lexical
+    }
+
     pub fn into_store(self) -> ChunkStore {
         self.store
+    }
+
+    pub fn into_parts(self) -> (ChunkStore, LexicalIndex) {
+        (self.store, self.lexical)
     }
 
     /// Test-only: interrupt after `n` successful `insert_batch` calls.
@@ -287,6 +307,8 @@ impl<'a> Indexer<'a> {
             let t = Instant::now();
             let compact_report = self.store.compact()?;
             report.store_millis += t.elapsed().as_millis() as u64;
+            self.lexical.renumber(&compact_report.row_mapping)?;
+            self.lexical.commit()?;
             report.compacted = Some(compact_report);
         }
         Ok(())
@@ -310,13 +332,22 @@ impl<'a> Indexer<'a> {
                     let n = rows.len() as u64;
                     if n > 0 {
                         self.store.tombstone(&rows)?;
+                        self.lexical.remove(&rows)?;
+                        self.lexical.commit()?;
                         report.chunks_removed += n;
                         report.files_indexed += 1;
                     }
                 }
                 FileChange::Renamed { from, to } => {
+                    let rows = self.store.rows_for_file(from)?;
                     let n = self.store.rekey_file(from, to)?;
                     if n > 0 {
+                        let paths = rows
+                            .iter()
+                            .map(|row| (*row, to.clone()))
+                            .collect::<Vec<_>>();
+                        self.lexical.update_file_paths(&paths)?;
+                        self.lexical.commit()?;
                         // Re-parse destination so content changes bundled with a
                         // rename are reconciled; pure renames skip via hash set.
                         if let Some(item) = self.work_item_for_path(to, report)? {
@@ -581,6 +612,14 @@ impl<'a> Indexer<'a> {
                                 consume_err = Some(e.into());
                                 break;
                             }
+                            if let Err(e) = self
+                                .lexical
+                                .remove(&to_tombstone)
+                                .and_then(|_| self.lexical.commit())
+                            {
+                                consume_err = Some(e.into());
+                                break;
+                            }
                             report.store_millis += t.elapsed().as_millis() as u64;
                             report.chunks_removed += to_tombstone.len() as u64;
                         }
@@ -638,12 +677,27 @@ impl<'a> Indexer<'a> {
         report.embed_millis += t_embed.elapsed().as_millis() as u64;
 
         assert_eq!(embeddings.len(), pending.len());
+        let lexical_docs: Vec<_> = pending
+            .iter()
+            .map(|(rec, body)| {
+                (
+                    rec.clone(),
+                    LexicalDoc {
+                        symbol: rec.symbol.clone(),
+                        signature: rec.signature.clone(),
+                        doc_first_line: rec.doc_first_line.clone(),
+                        file: rec.file.clone(),
+                        body: body.clone(),
+                    },
+                )
+            })
+            .collect();
         let mut batch = Vec::with_capacity(pending.len());
-        for ((rec, _), emb) in pending.drain(..).zip(embeddings) {
+        for ((rec, _), emb) in pending.iter().zip(embeddings) {
             if emb.truncated {
                 report.chunks_truncated += 1;
             }
-            batch.push((rec, emb.vector));
+            batch.push((rec.clone(), emb.vector));
         }
 
         progress.phase(Phase::Storing, report.chunks_added, None);
@@ -651,7 +705,15 @@ impl<'a> Indexer<'a> {
         let ids = self.store.insert_batch(&batch)?;
         report.store_millis += t_store.elapsed().as_millis() as u64;
 
-        let novel = ids.len() as u64; // insert_batch returns one id per input; reused hashes still "added" from caller view
+        self.lexical.add_batch(
+            &ids.into_iter()
+                .zip(lexical_docs.into_iter().map(|(_, doc)| doc))
+                .collect::<Vec<_>>(),
+        )?;
+        self.lexical.commit()?;
+        pending.clear();
+
+        let novel = batch.len() as u64;
         // Count as added only hashes that were not already live — insert_batch reuses.
         // We only put novel hashes in pending, so all are added.
         report.chunks_added += novel;

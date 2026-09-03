@@ -23,6 +23,10 @@ pub enum IndexError {
     Infer(#[from] inference::InferError),
     #[error("retrieval error: {0}")]
     Retrieval(#[from] retrieval::RetrievalError),
+    #[error(
+        "lexical/store row count mismatch: store has {store_live} live rows, index has {indexed}"
+    )]
+    LexicalOutOfSync { store_live: u64, indexed: u64 },
     #[error("git error: {0}")]
     Git(String),
     #[error("io error: {0}")]

@@ -2850,6 +2850,7 @@ name = "retrieval"
 version = "0.1.0"
 dependencies = [
  "half",
+ "insta",
  "storage",
  "tantivy",
  "tempfile",
