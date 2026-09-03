@@ -391,4 +391,32 @@ mod tests {
             other => panic!("unexpected error: {other}"),
         }
     }
+
+    #[test]
+    fn tombstones_limits_and_descending_order_are_enforced() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ChunkStore::create(dir.path(), 1, "model").unwrap();
+        let chunks = (0..10)
+            .map(|index| {
+                (
+                    record(index),
+                    vec![f16::from_f32((10 - index) as f32)],
+                )
+            })
+            .collect::<Vec<_>>();
+        let rows = store.insert_batch(&chunks).unwrap();
+        store.tombstone(&[rows[0], rows[2], rows[4]]).unwrap();
+        let index = DenseIndex::from_store(&store, DenseBackend::Cpu).unwrap();
+        let query = [f16::ONE];
+
+        let top_five = index.search(&query, "model", 5).unwrap();
+        assert_eq!(
+            top_five.iter().map(|result| result.row).collect::<Vec<_>>(),
+            [rows[1], rows[3], rows[5], rows[6], rows[7]]
+        );
+        assert!(top_five.windows(2).all(|pair| pair[0].score >= pair[1].score));
+        assert_eq!(index.search(&query, "model", 2).unwrap().len(), 2);
+        assert_eq!(index.search(&query, "model", 100).unwrap().len(), 7);
+        assert!(index.search(&query, "model", 0).unwrap().is_empty());
+    }
 }
