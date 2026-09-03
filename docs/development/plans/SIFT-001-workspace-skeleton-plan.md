@@ -6,10 +6,12 @@
 
 ## Current-system context
 
-The repository contains three untracked planning documents and no commits:
-`docs/cuda-mcp-rtx2060-plan.md`, `docs/tech-stack.md`, and the task documents
-under `docs/development/`. There is no `Cargo.toml`, no `.gitignore`, no CI
-configuration, and no toolchain pin. Nothing is reusable because nothing exists.
+The repository contains untracked planning documents and no commits:
+`docs/cuda-mcp-rtx2060-plan.md`, `docs/tech-stack.md`, the task documents under
+`docs/development/`, and `AGENTS.md`, which already carries the workflow rules,
+the design-authority ruling, and the structural constraints for anyone working
+here. There is no `Cargo.toml`, no `.gitignore`, no CI configuration, and no
+toolchain pin. Nothing is reusable because nothing exists.
 
 The two documents disagree about language: the plan document's *Stack* and
 *Repository structure* sections describe a Python package, while `tech-stack.md`
@@ -137,7 +139,8 @@ fn member_list_matches_documented_layout() { /* elided */ }
 2. Write `.gitignore` covering build output, model artifacts, index and store
    data, and the runtime download cache. Create representative files in each
    ignored location and confirm `git status --porcelain` is empty. Commit,
-   including the existing `docs/` tree, as the repository's first commit.
+   including the existing `docs/` tree and `AGENTS.md`, as the repository's
+   first commit.
 3. Write the root `Cargo.toml` with the eight members, `resolver = "3"`,
    `[workspace.package]` carrying edition 2024, and an empty
    `[workspace.dependencies]`. Write `rust-toolchain.toml` pinning the channel
@@ -163,16 +166,17 @@ fn member_list_matches_documented_layout() { /* elided */ }
 7. Add a GitHub Actions workflow on a CPU-only runner whose only build step is
    `./ci.sh`, with a Rust toolchain step honouring `rust-toolchain.toml` and a
    cargo cache. Commit.
-8. Write `CONTRIBUTING.md` stating the validation command, the eight crates and
-   the purpose of each, the rule that GPU-dependent code stays behind the
-   `inference` trait and the `cuda` feature, and the separate local command for
-   running GPU tests. State the branch-naming convention as the task id and
-   slug with no suffix — `SIFT-001-workspace-skeleton`, not the spec filename —
-   since a branch carrying implementation should not be named for a document.
-   Commit.
+8. Write `CONTRIBUTING.md` covering what `AGENTS.md` does not: local setup, the
+   eight crates and the purpose of each, the separate local command for running
+   GPU tests, and how to obtain the CUDA toolkit and ONNX Runtime. Reference
+   `AGENTS.md` for the workflow rules, the branch-naming convention, the
+   design-authority ruling, and the GPU-behind-the-trait constraint rather than
+   restating them — two copies of a rule is one copy and one stale copy. Add a
+   test asserting `CONTRIBUTING.md` does not redefine the validation command,
+   so the single-source rule survives future edits. Commit.
 9. Human step: from a clean clone in a temporary directory, follow only
-   `CONTRIBUTING.md` and reach a green `./ci.sh`, noting any point at which a
-   question had to be asked.
+   `AGENTS.md` and `CONTRIBUTING.md` and reach a green `./ci.sh`, noting any
+   point at which a question had to be asked.
 10. Human step: run `cargo build --workspace --release`, confirm it completes,
     and confirm the produced binaries start and exit cleanly.
 11. Run the full validation suite and confirm it passes.
@@ -185,8 +189,8 @@ fn member_list_matches_documented_layout() { /* elided */ }
   ONNX Runtime present.
 - **Regression:** none — this task establishes the baseline rather than
   preserving one.
-- **Manual:** a clean-clone walkthrough following only `CONTRIBUTING.md`;
-  correct means a green run with no questions asked.
+- **Manual:** a clean-clone walkthrough following only `AGENTS.md` and
+  `CONTRIBUTING.md`; correct means a green run with no questions asked.
 - **Measurement:** wall-clock duration of `./ci.sh` on a clean checkout and on a
   warm cache, reported once as the cost every later task pays.
 
@@ -208,4 +212,4 @@ succeeds with no CUDA toolkit and no ONNX Runtime present, and that
 runs and the evidence that a deliberate lint warning failed it; wall-clock
 duration of `./ci.sh` cold and warm; confirmation that CI's only build step is
 `./ci.sh`; and the result of the clean-clone walkthrough, including any point at
-which `CONTRIBUTING.md` was insufficient.
+which `AGENTS.md` or `CONTRIBUTING.md` was insufficient.
