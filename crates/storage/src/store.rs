@@ -42,14 +42,31 @@ pub struct CompactionReport {
 pub struct ChunkStore {
     dir: PathBuf,
     conn: Connection,
-    matrix: EmbeddingMatrix,
+    matrix: Option<EmbeddingMatrix>,
     /// Test hook: count of statements prepared by get_many.
     statements_prepared: std::cell::Cell<u64>,
     /// Test hook: fail before committing insert_batch when set.
     fail_before_commit: bool,
 }
 
+impl std::fmt::Debug for ChunkStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChunkStore")
+            .field("dir", &self.dir)
+            .field("matrix", &self.matrix)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ChunkStore {
+    fn matrix_ref(&self) -> &EmbeddingMatrix {
+        self.matrix.as_ref().expect("matrix present")
+    }
+
+    fn matrix_mut(&mut self) -> &mut EmbeddingMatrix {
+        self.matrix.as_mut().expect("matrix present")
+    }
+
     pub fn create(dir: &Path, dims: u32, model_id: &str) -> Result<Self, StoreError> {
         std::fs::create_dir_all(dir)?;
         let db_path = dir.join(DB_NAME);
@@ -68,7 +85,7 @@ impl ChunkStore {
         Ok(Self {
             dir: dir.to_path_buf(),
             conn,
-            matrix,
+            matrix: Some(matrix),
             statements_prepared: std::cell::Cell::new(0),
             fail_before_commit: false,
         })
@@ -90,7 +107,7 @@ impl ChunkStore {
         let store = Self {
             dir: dir.to_path_buf(),
             conn,
-            matrix,
+            matrix: Some(matrix),
             statements_prepared: std::cell::Cell::new(0),
             fail_before_commit: false,
         };
@@ -107,7 +124,7 @@ impl ChunkStore {
         &mut self,
         chunks: &[(ChunkRecord, Vec<f16>)],
     ) -> Result<Vec<RowId>, StoreError> {
-        let dims = self.matrix.dims();
+        let dims = self.matrix_ref().dims();
         for (_rec, vec) in chunks {
             if vec.len() as u32 != dims {
                 return Err(StoreError::DimensionMismatch {
@@ -122,7 +139,7 @@ impl ChunkStore {
         // append, truncate matrix rows back to the pre-batch count so an
         // interrupted batch leaves no orphan rows when we control the failure;
         // a crash between append and commit leaves orphans that verify reports.
-        let rows_before = self.matrix.rows();
+        let rows_before = self.matrix_ref().rows();
         let mut result = Vec::with_capacity(chunks.len());
         let mut new_rows: Vec<(RowId, &ChunkRecord)> = Vec::new();
 
@@ -142,12 +159,12 @@ impl ChunkStore {
                 result.push(row);
                 continue;
             }
-            let row = self.matrix.append(vec)?;
+            let row = self.matrix_mut().append(vec)?;
             batch_hash_to_row.insert(hash, row);
             new_rows.push((row, rec));
             result.push(row);
         }
-        self.matrix.flush()?;
+        self.matrix_mut().flush()?;
 
         let insert_result = (|| -> Result<(), StoreError> {
             let tx = self.conn.unchecked_transaction()?;
@@ -166,12 +183,12 @@ impl ChunkStore {
 
         if let Err(e) = insert_result {
             // Roll back matrix rows appended for this batch when we can.
-            let mut header = self.matrix.header().clone();
+            let mut header = self.matrix_ref().header().clone();
             header.rows = rows_before;
-            let path = self.matrix.path().to_path_buf();
+            let path = self.matrix_ref().path().to_path_buf();
             // Remap after rewriting header.
             EmbeddingMatrix::rewrite_header_on_disk(&path, &header)?;
-            self.matrix = EmbeddingMatrix::open_mut(&path)?;
+            self.matrix = Some(EmbeddingMatrix::open_mut(&path)?);
             return Err(e);
         }
 
@@ -329,7 +346,7 @@ impl ChunkStore {
     }
 
     pub fn verify(&self) -> Result<Integrity, StoreError> {
-        let matrix_rows = self.matrix.rows();
+        let matrix_rows = self.matrix_ref().rows();
         let mut orphan_rows = Vec::new();
         let mut missing_rows = Vec::new();
         let mut duplicate_rows = Vec::new();
@@ -422,7 +439,7 @@ impl ChunkStore {
             })?;
             for item in iter {
                 let (row, rec) = item?;
-                let vector = self.matrix.row(row)?.to_vec();
+                let vector = self.matrix_ref().row(row)?.to_vec();
                 live_rows.push((rec, vector));
             }
         }
@@ -432,8 +449,8 @@ impl ChunkStore {
         let _ = std::fs::remove_file(&tmp_db);
         let _ = std::fs::remove_file(&tmp_matrix);
 
-        let dims = self.matrix.dims();
-        let model_id = self.matrix.model_id().to_owned();
+        let dims = self.matrix_ref().dims();
+        let model_id = self.matrix_ref().model_id().to_owned();
         let indexed = self.indexed_commit()?;
 
         {
@@ -452,7 +469,6 @@ impl ChunkStore {
             }
             new_matrix.flush()?;
             tx.commit()?;
-            // Shrink matrix file to exact used size.
             let header_rows = new_matrix.rows();
             drop(new_matrix);
             let file_len = 288u64 + header_rows * dims as u64 * 2;
@@ -463,26 +479,22 @@ impl ChunkStore {
             f.set_len(file_len)?;
         }
 
-        // Close current resources before rename swap.
-        // SQLite: reopen after swap. Drop matrix map first.
         let db_path = self.dir.join(DB_NAME);
         let matrix_path = self.dir.join(MATRIX_NAME);
-        // Replace connections by swapping files.
-        // We need to close conn — Connection doesn't have close that recovers.
-        // Open a new store after rename by replacing fields.
-        {
-            // Finalize: replace files atomically.
-            // On Unix, rename over existing is atomic.
-            std::fs::rename(&tmp_matrix, &matrix_path)?;
-            std::fs::rename(&tmp_db, &db_path)?;
-        }
 
-        // Reopen.
+        // Close open handles so rename replaces the files we will reopen.
+        let old_conn = std::mem::replace(&mut self.conn, Connection::open_in_memory()?);
+        let _ = old_conn.close();
+        self.matrix = None;
+
+        std::fs::rename(&tmp_matrix, &matrix_path)?;
+        std::fs::rename(&tmp_db, &db_path)?;
+
         let conn = Connection::open(&db_path)?;
         configure_connection(&conn)?;
         let matrix = EmbeddingMatrix::open_mut(&matrix_path)?;
         self.conn = conn;
-        self.matrix = matrix;
+        self.matrix = Some(matrix);
 
         let live_after = self.stats()?.live;
         Ok(CompactionReport {
@@ -493,7 +505,7 @@ impl ChunkStore {
     }
 
     pub fn matrix(&self) -> &EmbeddingMatrix {
-        &self.matrix
+        self.matrix_ref()
     }
 
     pub fn indexed_commit(&self) -> Result<Option<String>, StoreError> {
@@ -515,7 +527,7 @@ impl ChunkStore {
 
     /// Require the matrix model id matches `expected` (for query-time guards).
     pub fn require_model(&self, expected: &str) -> Result<(), StoreError> {
-        let got = self.matrix.model_id();
+        let got = self.matrix_ref().model_id();
         if got != expected {
             return Err(StoreError::ModelMismatch {
                 expected: expected.to_owned(),

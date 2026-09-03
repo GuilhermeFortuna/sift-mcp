@@ -321,6 +321,23 @@ impl EmbeddingMatrix {
         Ok(())
     }
 
+    /// Test helper: rewrite the on-disk header row count without a live map.
+    pub fn rewrite_header_for_test(
+        path: &Path,
+        dims: u32,
+        model_id: &str,
+        rows: u64,
+    ) -> Result<(), StoreError> {
+        let header = MatrixHeader {
+            magic: *MAGIC,
+            format_version: MATRIX_FORMAT_VERSION,
+            dims,
+            rows,
+            model_id: model_id.to_owned(),
+        };
+        Self::rewrite_header_on_disk(path, &header)
+    }
+
     /// Rewrite file to exactly `rows` of capacity (compaction helper).
     pub(crate) fn create_compacted(
         path: &Path,
@@ -332,7 +349,6 @@ impl EmbeddingMatrix {
         for v in vectors {
             matrix.append(v)?;
         }
-        // Shrink file to exact used size for the report.
         let used = HEADER_SIZE as u64 + matrix.header.rows * dims as u64 * 2;
         matrix.flush()?;
         matrix.map = Map::Read(unsafe {
