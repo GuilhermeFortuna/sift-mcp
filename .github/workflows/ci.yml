@@ -1,0 +1,14 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+      - run: ./ci.sh
