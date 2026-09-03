@@ -47,6 +47,14 @@ impl Ord for Candidate {
 }
 
 impl<'a> DenseIndex<'a> {
+    pub fn from_store(
+        store: &'a ChunkStore,
+        backend: DenseBackend,
+    ) -> Result<Self, RetrievalError> {
+        let live = LiveMask::from_store(store)?;
+        Self::prepare(store.matrix(), &live, backend)
+    }
+
     pub fn prepare(
         matrix: &'a EmbeddingMatrix,
         live: &LiveMask,
@@ -181,6 +189,7 @@ impl LiveMask {
 #[cfg(test)]
 mod tests {
     use half::f16;
+    use inference::{Embedder, MockEmbedder, Role};
     use storage::{ChunkRecord, ChunkStore, ContentHash, EmbeddingMatrix, RowId};
     use tempfile::TempDir;
 
@@ -276,5 +285,33 @@ mod tests {
             let actual = index.search(&query, "model", 25).unwrap();
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn mock_query_returns_matching_chunk_at_rank_one() {
+        const DIMS: u32 = 64;
+        let dir = TempDir::new().unwrap();
+        let embedder = MockEmbedder::new(DIMS);
+        let texts = [
+            "parse an incoming packet",
+            "clamp timestamps that move backwards",
+            "render the final frame",
+            "flush pending writes",
+        ];
+        let embeddings = embedder.embed(&texts, Role::Document).unwrap();
+        let mut store = ChunkStore::create(dir.path(), DIMS, embedder.model_id()).unwrap();
+        let chunks = texts
+            .iter()
+            .zip(embeddings)
+            .enumerate()
+            .map(|(index, (_text, embedding))| (record(index as u64), embedding.vector))
+            .collect::<Vec<_>>();
+        let rows = store.insert_batch(&chunks).unwrap();
+        let index = DenseIndex::from_store(&store, DenseBackend::Cpu).unwrap();
+
+        let query = embedder.query_matching(texts[1]);
+        let results = index.search(&query, embedder.model_id(), 3).unwrap();
+
+        assert_eq!(results[0].row, rows[1]);
     }
 }
