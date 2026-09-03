@@ -3,6 +3,10 @@
 //! This crate currently hosts the committed reference fixtures from SIFT-004
 //! and structural validation that runs with no framework or GPU present.
 
+pub mod metadata;
+
+pub use metadata::{MetadataError, ModelMetadata, Normalize, Pooling};
+
 #[cfg(test)]
 mod fixture_tests {
     use std::collections::HashSet;
