@@ -31,6 +31,11 @@ impl LiveMask {
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_bits(rows: Vec<bool>) -> Self {
+        Self { rows }
+    }
 }
 
 #[cfg(test)]
