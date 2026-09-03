@@ -1,6 +1,6 @@
+use crate::Integrity;
 use crate::error::StoreError;
 use crate::record::RowId;
-use crate::Integrity;
 use half::f16;
 use memmap2::{Mmap, MmapMut, MmapOptions};
 use std::fs::{File, OpenOptions};
@@ -366,7 +366,10 @@ impl EmbeddingMatrix {
     }
 
     /// Sync header.rows to the file without holding the map (corruption helpers).
-    pub(crate) fn rewrite_header_on_disk(path: &Path, header: &MatrixHeader) -> Result<(), StoreError> {
+    pub(crate) fn rewrite_header_on_disk(
+        path: &Path,
+        header: &MatrixHeader,
+    ) -> Result<(), StoreError> {
         let mut file = OpenOptions::new().write(true).open(path)?;
         file.seek(SeekFrom::Start(0))?;
         file.write_all(&header.encode()?)?;

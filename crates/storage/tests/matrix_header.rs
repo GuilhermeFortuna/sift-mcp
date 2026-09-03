@@ -1,6 +1,6 @@
 use tempfile::tempdir;
 
-use storage::{EmbeddingMatrix, StoreError, MATRIX_FORMAT_VERSION};
+use storage::{EmbeddingMatrix, MATRIX_FORMAT_VERSION, StoreError};
 
 #[test]
 fn create_and_open_preserves_dims_and_model_id() {
@@ -24,10 +24,7 @@ fn open_rejects_wrong_magic() {
     // Corrupt the magic bytes.
     {
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .unwrap();
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         f.write_all(b"BADMAGIC").unwrap();
     }
     let err = EmbeddingMatrix::open(&path).unwrap_err();
@@ -45,10 +42,7 @@ fn open_rejects_wrong_format_version() {
     // Overwrite format_version (offset 8, little-endian u32).
     {
         use std::io::{Seek, SeekFrom, Write};
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .unwrap();
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         f.seek(SeekFrom::Start(8)).unwrap();
         let bad = (MATRIX_FORMAT_VERSION + 1).to_le_bytes();
         f.write_all(&bad).unwrap();

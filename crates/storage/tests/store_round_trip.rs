@@ -30,9 +30,7 @@ fn single_chunk_round_trip_by_row_hash_and_file() {
     let mut store = ChunkStore::create(dir.path(), 4, "model-a").unwrap();
     let record = sample_record(1);
     let vector = sample_vec(4, 0.5);
-    let rows = store
-        .insert_batch(&[(record.clone(), vector)])
-        .unwrap();
+    let rows = store.insert_batch(&[(record.clone(), vector)]).unwrap();
     assert_eq!(rows.len(), 1);
     let row = rows[0];
 

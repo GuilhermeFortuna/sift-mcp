@@ -1,7 +1,7 @@
 use half::f16;
 use tempfile::tempdir;
 
-use storage::{ChunkRecord, ChunkStore, ContentHash, StoreError, SCHEMA_VERSION};
+use storage::{ChunkRecord, ChunkStore, ContentHash, SCHEMA_VERSION, StoreError};
 
 fn rec() -> ChunkRecord {
     ChunkRecord {

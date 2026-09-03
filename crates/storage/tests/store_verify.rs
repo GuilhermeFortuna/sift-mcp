@@ -45,7 +45,10 @@ fn verify_reports_orphan_when_metadata_row_removed() {
         .unwrap();
     store
         .conn_mut()
-        .execute("DELETE FROM chunks WHERE rowid = ?1", [rows[1].get() as i64])
+        .execute(
+            "DELETE FROM chunks WHERE rowid = ?1",
+            [rows[1].get() as i64],
+        )
         .unwrap();
     match store.verify().unwrap() {
         Integrity::Broken { orphan_rows, .. } => {
@@ -72,8 +75,7 @@ fn verify_reports_missing_when_matrix_truncated() {
             ])
             .unwrap();
     }
-    EmbeddingMatrix::rewrite_header_for_test(&store_dir.join("embeddings.f16"), 4, "m", 1)
-        .unwrap();
+    EmbeddingMatrix::rewrite_header_for_test(&store_dir.join("embeddings.f16"), 4, "m", 1).unwrap();
 
     let err = ChunkStore::open(&store_dir).unwrap_err();
     match err {

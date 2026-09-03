@@ -2,7 +2,7 @@ use crate::error::StoreError;
 use crate::matrix::EmbeddingMatrix;
 use crate::record::{ChunkRecord, ContentHash, RowId};
 use half::f16;
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::path::{Path, PathBuf};
 
 /// Metadata schema version. Independent of the matrix format version.
@@ -22,7 +22,9 @@ pub struct StoreStats {
 /// Result of the correspondence check. Never panics on a corrupt store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Integrity {
-    Ok { live: u64 },
+    Ok {
+        live: u64,
+    },
     Broken {
         orphan_rows: Vec<RowId>,
         missing_rows: Vec<RowId>,
@@ -69,9 +71,11 @@ impl ChunkStore {
 
     /// Drop trailing matrix rows that have no metadata (crash recovery).
     fn reclaim_trailing_orphans(&mut self) -> Result<(), StoreError> {
-        let meta_count: u64 = self.conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| {
-            r.get::<_, i64>(0).map(|v| v as u64)
-        })?;
+        let meta_count: u64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| {
+                r.get::<_, i64>(0).map(|v| v as u64)
+            })?;
         let max_rowid: Option<u64> = self
             .conn
             .query_row("SELECT MAX(rowid) FROM chunks", [], |r| {
@@ -218,8 +222,7 @@ impl ChunkStore {
                 insert_chunk(&tx, *row, rec)?;
             }
             if self.fail_before_commit {
-                return Err(StoreError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                return Err(StoreError::Io(std::io::Error::other(
                     "injected failure before commit",
                 )));
             }
@@ -248,7 +251,7 @@ impl ChunkStore {
              FROM chunks WHERE rowid = ?1 AND live = 1",
         )?;
         let rec = stmt
-            .query_row(params![row.get() as i64], |r| row_to_record(r))
+            .query_row(params![row.get() as i64], row_to_record)
             .optional()?;
         Ok(rec)
     }
@@ -343,9 +346,9 @@ impl ChunkStore {
     }
 
     pub fn rows_for_file(&self, file: &str) -> Result<Vec<RowId>, StoreError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT rowid FROM chunks WHERE file = ?1 AND live = 1 ORDER BY rowid",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT rowid FROM chunks WHERE file = ?1 AND live = 1 ORDER BY rowid")?;
         let rows = stmt
             .query_map(params![file], |r| {
                 let id: i64 = r.get(0)?;
@@ -358,7 +361,8 @@ impl ChunkStore {
     pub fn tombstone(&mut self, rows: &[RowId]) -> Result<(), StoreError> {
         let tx = self.conn.unchecked_transaction()?;
         {
-            let mut stmt = tx.prepare("UPDATE chunks SET live = 0 WHERE rowid = ?1 AND live = 1")?;
+            let mut stmt =
+                tx.prepare("UPDATE chunks SET live = 0 WHERE rowid = ?1 AND live = 1")?;
             for row in rows {
                 stmt.execute(params![row.get() as i64])?;
             }
@@ -368,16 +372,16 @@ impl ChunkStore {
     }
 
     pub fn stats(&self) -> Result<StoreStats, StoreError> {
-        let live: u64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM chunks WHERE live = 1",
-            [],
-            |r| r.get::<_, i64>(0).map(|v| v as u64),
-        )?;
-        let dead: u64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM chunks WHERE live = 0",
-            [],
-            |r| r.get::<_, i64>(0).map(|v| v as u64),
-        )?;
+        let live: u64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM chunks WHERE live = 1", [], |r| {
+                    r.get::<_, i64>(0).map(|v| v as u64)
+                })?;
+        let dead: u64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM chunks WHERE live = 0", [], |r| {
+                    r.get::<_, i64>(0).map(|v| v as u64)
+                })?;
         let total = live + dead;
         let dead_fraction = if total == 0 {
             0.0
@@ -650,11 +654,9 @@ fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<(), StoreError>
 }
 
 fn meta_u32(conn: &Connection, key: &str) -> Result<u32, StoreError> {
-    let s: String = conn.query_row(
-        "SELECT value FROM meta WHERE key = ?1",
-        params![key],
-        |r| r.get(0),
-    )?;
+    let s: String = conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+        r.get(0)
+    })?;
     s.parse::<u32>().map_err(|e| {
         StoreError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,

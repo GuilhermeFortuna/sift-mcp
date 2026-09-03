@@ -34,7 +34,7 @@ fn main() {
             .collect();
         store.insert_batch(&batch).expect("insert");
         i += 500;
-        if i % 5000 == 0 {
+        if i.is_multiple_of(5000) {
             eprintln!("wrote {i} chunks");
         }
     }
