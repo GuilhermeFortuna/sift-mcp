@@ -436,4 +436,43 @@ mod tests {
         assert_eq!(results.len(), 25);
         assert_eq!(store.take_statements_prepared(), 0);
     }
+
+    #[test]
+    fn repeated_queries_break_equal_scores_by_ascending_row() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("ties.f16");
+        let mut matrix = EmbeddingMatrix::create(&path, 2, "model").unwrap();
+        for _ in 0..6 {
+            matrix.append(&[f16::ONE, f16::ZERO]).unwrap();
+        }
+        let live = LiveMask::from_bits(vec![true; 6]);
+        let index = DenseIndex::prepare(&matrix, &live, DenseBackend::Cpu).unwrap();
+        let query = [f16::ONE, f16::ZERO];
+
+        let first = index.search(&query, "model", 4).unwrap();
+        let second = index.search(&query, "model", 4).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first.iter().map(|result| result.row).collect::<Vec<_>>(),
+            (0..4).map(RowId::from_u64).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn mock_embeddings_stored_for_dense_search_are_unit_normalized() {
+        let embedder = MockEmbedder::new(64);
+        let embeddings = embedder
+            .embed(&["alpha", "beta", "gamma", "delta"], Role::Document)
+            .unwrap();
+        for embedding in embeddings {
+            let norm = embedding
+                .vector
+                .iter()
+                .map(|value| value.to_f32().powi(2))
+                .sum::<f32>()
+                .sqrt();
+            assert!((norm - 1.0).abs() < 1e-3, "unexpected norm {norm}");
+        }
+    }
 }
