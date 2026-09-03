@@ -9,8 +9,12 @@ default = []
 cuda = ["dep:ort"]
 
 [dependencies]
+half = { workspace = true }
 ort = { workspace = true, optional = true }
-
-[dev-dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokenizers = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
