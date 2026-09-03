@@ -30,8 +30,8 @@ pub fn pool(
                 }
                 if count > 0 {
                     let inv = 1.0 / count as f32;
-                    for d in 0..dims {
-                        row_out[d] *= inv;
+                    for v in row_out.iter_mut() {
+                        *v *= inv;
                     }
                 } else {
                     // No real tokens: average all positions (matches verify_export.py).
@@ -43,8 +43,8 @@ pub fn pool(
                     }
                     if seq > 0 {
                         let inv = 1.0 / seq as f32;
-                        for d in 0..dims {
-                            row_out[d] *= inv;
+                        for v in row_out.iter_mut() {
+                            *v *= inv;
                         }
                     }
                 }
