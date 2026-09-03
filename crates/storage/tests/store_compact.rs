@@ -43,6 +43,18 @@ fn compact_reclaims_dead_rows_preserving_live_data() {
     store.tombstone(&dead).unwrap();
     let report = store.compact().unwrap();
     assert_eq!(report.live_after, 700);
+    assert_eq!(report.row_mapping.len(), 700);
+    assert_eq!(
+        (report.row_mapping[0].0.get(), report.row_mapping[0].1.get()),
+        (300, 0)
+    );
+    assert_eq!(
+        (
+            report.row_mapping[699].0.get(),
+            report.row_mapping[699].1.get()
+        ),
+        (999, 699)
+    );
     assert_eq!(store.matrix().rows(), 700);
     match store.verify().unwrap() {
         Integrity::Ok { live } => assert_eq!(live, 700),

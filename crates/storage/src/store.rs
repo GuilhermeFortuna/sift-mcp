@@ -38,6 +38,7 @@ pub struct CompactionReport {
     pub live_before: u64,
     pub dead_reclaimed: u64,
     pub live_after: u64,
+    pub row_mapping: Vec<(RowId, RowId)>,
 }
 
 /// Durable chunk metadata + embedding matrix.
@@ -474,7 +475,7 @@ impl ChunkStore {
         let live_before = stats.live;
         let dead_reclaimed = stats.dead;
 
-        let mut live_rows: Vec<(ChunkRecord, Vec<f16>)> = Vec::new();
+        let mut live_rows: Vec<(RowId, ChunkRecord, Vec<f16>)> = Vec::new();
         {
             let mut stmt = self.conn.prepare(
                 "SELECT rowid, repository, file, language, symbol, symbol_type, signature,
@@ -500,7 +501,7 @@ impl ChunkStore {
             for item in iter {
                 let (row, rec) = item?;
                 let vector = self.matrix_ref().row(row)?.to_vec();
-                live_rows.push((rec, vector));
+                live_rows.push((row, rec, vector));
             }
         }
 
@@ -523,7 +524,7 @@ impl ChunkStore {
                 set_meta(&new_conn, "indexed_commit", commit)?;
             }
             let tx = new_conn.unchecked_transaction()?;
-            for (rec, vec) in &live_rows {
+            for (_old_row, rec, vec) in &live_rows {
                 let row = new_matrix.append(vec)?;
                 insert_chunk(&tx, row, rec)?;
             }
@@ -557,10 +558,16 @@ impl ChunkStore {
         self.matrix = Some(matrix);
 
         let live_after = self.stats()?.live;
+        let row_mapping = live_rows
+            .iter()
+            .enumerate()
+            .map(|(new_row, (old_row, _, _))| (*old_row, RowId::new(new_row as u64)))
+            .collect();
         Ok(CompactionReport {
             live_before,
             dead_reclaimed,
             live_after,
+            row_mapping,
         })
     }
 
