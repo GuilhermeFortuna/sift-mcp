@@ -93,6 +93,51 @@ impl LexicalIndex {
         Ok(())
     }
 
+    pub fn remove(&mut self, rows: &[RowId]) -> Result<(), RetrievalError> {
+        for row in rows {
+            self.writer
+                .delete_term(Term::from_field_u64(self.fields.row, row.get()));
+        }
+        Ok(())
+    }
+
+    pub fn update_file_paths(&mut self, paths: &[(RowId, String)]) -> Result<(), RetrievalError> {
+        for (row, path) in paths {
+            let Some(old_document) = self.load_document(*row)? else {
+                continue;
+            };
+            let Some(mut document) = lexical_doc(&old_document, self.fields) else {
+                continue;
+            };
+            document.file = path.clone();
+            self.writer
+                .delete_term(Term::from_field_u64(self.fields.row, row.get()));
+            self.writer
+                .add_document(to_document(self.fields, *row, &document))
+                .map_err(tantivy_error)?;
+        }
+        Ok(())
+    }
+
+    pub fn renumber(&mut self, mapping: &[(RowId, RowId)]) -> Result<(), RetrievalError> {
+        for (old_row, new_row) in mapping {
+            let Some(old_document) = self.load_document(*old_row)? else {
+                continue;
+            };
+            let Some(document) = lexical_doc(&old_document, self.fields) else {
+                continue;
+            };
+            self.writer
+                .delete_term(Term::from_field_u64(self.fields.row, old_row.get()));
+            self.writer
+                .delete_term(Term::from_field_u64(self.fields.row, new_row.get()));
+            self.writer
+                .add_document(to_document(self.fields, *new_row, &document))
+                .map_err(tantivy_error)?;
+        }
+        Ok(())
+    }
+
     pub fn commit(&mut self) -> Result<(), RetrievalError> {
         self.writer.commit().map_err(tantivy_error)?;
         self.reader.reload().map_err(tantivy_error)?;
@@ -174,6 +219,24 @@ impl LexicalIndex {
         Some(Box::new(BooleanQuery::new(clauses)))
     }
 
+    fn load_document(&self, row: RowId) -> Result<Option<TantivyDocument>, RetrievalError> {
+        let query = TermQuery::new(
+            Term::from_field_u64(self.fields.row, row.get()),
+            IndexRecordOption::Basic,
+        );
+        let searcher = self.reader.searcher();
+        let mut documents = searcher
+            .search(&query, &TopDocs::with_limit(1))
+            .map_err(tantivy_error)?;
+        let Some((_, address)) = documents.pop() else {
+            return Ok(None);
+        };
+        searcher
+            .doc::<TantivyDocument>(address)
+            .map(Some)
+            .map_err(tantivy_error)
+    }
+
     pub fn num_docs(&self) -> u64 {
         self.reader.searcher().num_docs() as u64
     }
@@ -230,10 +293,23 @@ fn to_document(fields: Fields, row: RowId, doc: &LexicalDoc) -> TantivyDocument 
     document
 }
 
+fn lexical_doc(document: &TantivyDocument, fields: Fields) -> Option<LexicalDoc> {
+    Some(LexicalDoc {
+        symbol: document.get_first(fields.symbol)?.as_str()?.to_owned(),
+        signature: document.get_first(fields.signature)?.as_str()?.to_owned(),
+        doc_first_line: document
+            .get_first(fields.doc)
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        file: document.get_first(fields.file)?.as_str()?.to_owned(),
+        body: document.get_first(fields.body)?.as_str()?.to_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use half::f16;
-    use storage::{ChunkRecord, ChunkStore, ContentHash};
+    use storage::{ChunkRecord, ChunkStore, ContentHash, RowId};
     use tempfile::tempdir;
 
     use super::{LexicalDoc, LexicalIndex};
@@ -552,5 +628,51 @@ mod tests {
         index.reader.reload().unwrap();
         let after = index.search("same", 4).unwrap();
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn removes_updates_paths_and_renumbers_rows() {
+        let dir = tempdir().unwrap();
+        let mut store = ChunkStore::create(dir.path(), 1, "test").unwrap();
+        let records: Vec<_> = (0..3).map(record).collect();
+        let rows = store
+            .insert_batch(
+                &records
+                    .iter()
+                    .map(|record| (record.clone(), vec![f16::from_f32(0.0)]))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let mut index = LexicalIndex::open(dir.path()).unwrap();
+        index
+            .add_batch(
+                &rows
+                    .iter()
+                    .enumerate()
+                    .map(|(seed, row)| (*row, document(seed as u8)))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        index.commit().unwrap();
+
+        index.remove(&[rows[1]]).unwrap();
+        index.commit().unwrap();
+        assert!(index.search("unique1", 10).unwrap().is_empty());
+
+        index
+            .update_file_paths(&[(rows[0], "renamed/path.rs".into())])
+            .unwrap();
+        index.commit().unwrap();
+        assert_eq!(index.search("renamed path", 10).unwrap()[0].row, rows[0]);
+
+        index
+            .renumber(&[
+                (rows[0], RowId::from_u64(100)),
+                (rows[2], RowId::from_u64(102)),
+            ])
+            .unwrap();
+        index.commit().unwrap();
+        assert_eq!(index.search("unique0", 10).unwrap()[0].row.get(), 100);
+        assert_eq!(index.search("unique2", 10).unwrap()[0].row.get(), 102);
     }
 }
