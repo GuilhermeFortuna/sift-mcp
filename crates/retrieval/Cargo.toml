@@ -8,3 +8,7 @@ publish = false
 storage = { path = "../storage" }
 tantivy = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+half = { workspace = true }
+tempfile = { workspace = true }

@@ -26,6 +26,10 @@ impl RowId {
         Self(id)
     }
 
+    pub fn from_u64(id: u64) -> Self {
+        Self::new(id)
+    }
+
     pub fn get(self) -> u64 {
         self.0
     }
