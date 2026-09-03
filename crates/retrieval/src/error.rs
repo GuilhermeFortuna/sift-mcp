@@ -8,4 +8,13 @@ pub enum RetrievalError {
 
     #[error("tantivy error: {0}")]
     Tantivy(String),
+
+    #[error("embedding dimension mismatch: expected {expected}, got {got}")]
+    DimensionMismatch { expected: u32, got: u32 },
+
+    #[error("model identity mismatch: expected {expected}, got {got}")]
+    ModelMismatch { expected: String, got: String },
+
+    #[error("dense index error: {0}")]
+    Dense(String),
 }
