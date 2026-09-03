@@ -170,8 +170,11 @@ fn lexical_index_tracks_pipeline_lifecycle() {
         .compacted
         .as_ref()
         .expect("deleting one of two rows should compact at this threshold");
+    // Parse runs on a thread pool, so insertion order (and therefore the
+    // surviving row id) is not stable across cores. Compaction still packs
+    // the live survivor to row 0.
     assert_eq!(compaction.row_mapping.len(), 1);
-    assert_eq!(compaction.row_mapping[0].0.get(), 1);
+    assert_eq!(compaction.row_mapping[0].0, alpha_rows[0]);
     assert_eq!(compaction.row_mapping[0].1.get(), 0);
     assert!(
         indexer
