@@ -9,7 +9,7 @@ use ort::session::Session;
 use ort::value::Tensor;
 
 use crate::artifacts::verify_model_dir;
-use crate::embedder::{embed_with_batch_limit, Embedder, Embedding, InferError, Role};
+use crate::embedder::{Embedder, Embedding, InferError, Role, embed_with_batch_limit};
 use crate::metadata::{ModelMetadata, Normalize};
 use crate::pooling::{l2_normalize_rows, pool};
 use crate::tokenize::TextTokenizer;
@@ -71,9 +71,12 @@ impl OnnxEmbedder {
             .map_err(|e| InferError::GpuUnavailable {
                 detail: e.to_string(),
             })?;
-        let session = builder.commit_from_file(&onnx_path).map_err(|e| InferError::GpuUnavailable {
-            detail: e.to_string(),
-        })?;
+        let session =
+            builder
+                .commit_from_file(&onnx_path)
+                .map_err(|e| InferError::GpuUnavailable {
+                    detail: e.to_string(),
+                })?;
 
         Ok(Self {
             session: Mutex::new(session),
@@ -85,11 +88,17 @@ impl OnnxEmbedder {
     }
 
     pub fn peak_gpu_bytes(&self) -> u64 {
-        *self.peak_gpu_bytes.lock().unwrap_or_else(|e| e.into_inner())
+        *self
+            .peak_gpu_bytes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn set_peak_gpu_bytes(&self, bytes: u64) {
-        let mut guard = self.peak_gpu_bytes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .peak_gpu_bytes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *guard = (*guard).max(bytes);
     }
 

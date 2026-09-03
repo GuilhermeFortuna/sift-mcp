@@ -21,10 +21,7 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 
 fn query_vram_used_bytes() -> Option<u64> {
     let out = Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=memory.used",
-            "--format=csv,noheader,nounits",
-        ])
+        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -47,9 +44,7 @@ fn main() {
 
     let model_dir = env::var("SIFT_MODEL_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/primary")
-        });
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/primary"));
 
     let max_batch = 32usize;
     let embedder = OnnxEmbedder::load(&model_dir, max_batch).unwrap_or_else(|e| {

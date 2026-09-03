@@ -31,11 +31,10 @@ const TOKENIZER_HASH_CANDIDATES: &[&str] = &[
 pub fn verify_model_dir(model_dir: &Path) -> Result<ModelMetadata, InferError> {
     let meta_path = model_dir.join(METADATA_NAME);
     if !meta_path.is_file() {
-        return Err(InferError::ModelFilesMissing {
-            path: meta_path,
-        });
+        return Err(InferError::ModelFilesMissing { path: meta_path });
     }
-    let meta_json = fs::read_to_string(&meta_path).map_err(|e| InferError::Runtime(e.to_string()))?;
+    let meta_json =
+        fs::read_to_string(&meta_path).map_err(|e| InferError::Runtime(e.to_string()))?;
     let meta = ModelMetadata::from_json(&meta_json)?;
 
     let onnx_path = model_dir.join(ONNX_NAME);
@@ -94,8 +93,7 @@ fn sha256_paths(paths: &[PathBuf]) -> Result<String, InferError> {
             .ok_or_else(|| InferError::Runtime(format!("bad path {}", path.display())))?;
         hasher.update(name.as_bytes());
         hasher.update([0u8]);
-        let mut file =
-            fs::File::open(path).map_err(|e| InferError::Runtime(e.to_string()))?;
+        let mut file = fs::File::open(path).map_err(|e| InferError::Runtime(e.to_string()))?;
         let mut buf = [0u8; 1024 * 1024];
         loop {
             let n = file
@@ -188,9 +186,7 @@ mod tests {
         let b = InferError::GpuUnavailable {
             detail: "no cuda".into(),
         };
-        let c = InferError::Allocation {
-            requested_bytes: 1,
-        };
+        let c = InferError::Allocation { requested_bytes: 1 };
         assert_ne!(discriminant(&a), discriminant(&b));
         assert_ne!(discriminant(&b), discriminant(&c));
         assert_ne!(discriminant(&a), discriminant(&c));

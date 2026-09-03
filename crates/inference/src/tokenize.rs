@@ -195,11 +195,7 @@ mod tests {
             let (ids, truncated) = tok
                 .encode_unpadded(&case.text, role_from(&case.role))
                 .expect("encode");
-            assert_eq!(
-                ids, case.tokens,
-                "token mismatch for case {}",
-                case.name
-            );
+            assert_eq!(ids, case.tokens, "token mismatch for case {}", case.name);
             assert_eq!(
                 truncated, case.truncated,
                 "truncation flag mismatch for {}",

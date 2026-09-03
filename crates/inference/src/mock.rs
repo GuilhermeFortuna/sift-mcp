@@ -2,7 +2,7 @@
 
 use half::f16;
 
-use crate::embedder::{embed_with_batch_limit, Embedder, Embedding, InferError, Role};
+use crate::embedder::{Embedder, Embedding, InferError, Role, embed_with_batch_limit};
 use crate::pooling::l2_normalize_rows;
 
 /// Deterministic, CPU-only, no model files. Same text always yields the same
