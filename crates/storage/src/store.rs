@@ -371,6 +371,16 @@ impl ChunkStore {
         Ok(())
     }
 
+    /// Rewrite the `file` path on every live row for `from` to `to`.
+    /// Used for pure renames so content hashes (and embeddings) stay put.
+    pub fn rekey_file(&mut self, from: &str, to: &str) -> Result<u64, StoreError> {
+        let n = self.conn.execute(
+            "UPDATE chunks SET file = ?1 WHERE file = ?2 AND live = 1",
+            params![to, from],
+        )?;
+        Ok(n as u64)
+    }
+
     pub fn stats(&self) -> Result<StoreStats, StoreError> {
         let live: u64 =
             self.conn
