@@ -21,3 +21,4 @@ resolver = "3"
 edition = "2024"
 
 [workspace.dependencies]
+ort = "2.0.0-rc.13"
