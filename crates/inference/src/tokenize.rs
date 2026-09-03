@@ -101,11 +101,7 @@ impl TextTokenizer {
             encoded.push((ids, truncated));
         }
 
-        let pad_id = self
-            .tokenizer
-            .get_padding()
-            .map(|p| p.pad_id)
-            .unwrap_or(0);
+        let pad_id = self.pad_token_id();
 
         let mut out = Vec::with_capacity(texts.len());
         for (ids, truncated) in encoded {
@@ -131,6 +127,17 @@ impl TextTokenizer {
             });
         }
         Ok(out)
+    }
+
+    fn pad_token_id(&self) -> u32 {
+        if let Some(padding) = self.tokenizer.get_padding() {
+            return padding.pad_id;
+        }
+        // Match Hugging Face Qwen3: pad_token = <|endoftext|>
+        self.tokenizer
+            .token_to_id("<|endoftext|>")
+            .or_else(|| self.tokenizer.token_to_id("[PAD]"))
+            .unwrap_or(0)
     }
 }
 

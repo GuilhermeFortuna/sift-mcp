@@ -10,7 +10,7 @@ cuda = ["dep:ort"]
 
 [dependencies]
 half = { workspace = true }
-ort = { workspace = true, optional = true }
+ort = { workspace = true, optional = true, features = ["cuda", "half"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -19,3 +19,7 @@ tokenizers = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[[example]]
+name = "bench_embed"
+required-features = ["cuda"]

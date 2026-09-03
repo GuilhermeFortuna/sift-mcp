@@ -4,6 +4,8 @@ pub mod artifacts;
 pub mod embedder;
 pub mod metadata;
 pub mod mock;
+#[cfg(feature = "cuda")]
+pub mod onnx;
 pub mod pooling;
 pub mod tokenize;
 
@@ -11,6 +13,8 @@ pub use artifacts::verify_model_dir;
 pub use embedder::{Embedder, Embedding, InferError, Role};
 pub use metadata::{MetadataError, ModelMetadata, Normalize, Pooling};
 pub use mock::MockEmbedder;
+#[cfg(feature = "cuda")]
+pub use onnx::OnnxEmbedder;
 pub use pooling::{l2_normalize_rows, pool};
 pub use tokenize::TextTokenizer;
 
@@ -185,6 +189,6 @@ mod fixture_tests {
     #[test]
     #[ignore = "requires CUDA hardware and ONNX Runtime"]
     fn gpu_inference_is_only_meaningful_with_hardware() {
-        panic!("GPU inference tests are only meaningful with CUDA hardware and ONNX Runtime");
+        // Placeholder retained; real GPU coverage lives in onnx::tests::fixture_parity.
     }
 }
