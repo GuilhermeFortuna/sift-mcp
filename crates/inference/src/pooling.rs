@@ -49,8 +49,20 @@ pub fn pool(
                     }
                 }
             }
-            Pooling::LastToken | Pooling::Cls => {
-                // Implemented in a later step.
+            Pooling::LastToken => {
+                let mut idx: Option<usize> = None;
+                for s in 0..seq {
+                    if mask[b * seq + s] != 0 {
+                        idx = Some(s);
+                    }
+                }
+                let s = idx.unwrap_or(seq.saturating_sub(1));
+                let base = (b * seq + s) * dims;
+                row_out.copy_from_slice(&hidden[base..base + dims]);
+            }
+            Pooling::Cls => {
+                let base = b * seq * dims;
+                row_out.copy_from_slice(&hidden[base..base + dims]);
             }
         }
     }
@@ -102,5 +114,33 @@ mod tests {
         let alone_mask = vec![1u32];
         let alone = pool(&alone_hidden, &alone_mask, 1, 1, 2, Pooling::Mean);
         assert_eq!(&batched[2..4], &alone[..]);
+    }
+
+    #[test]
+    fn last_token_selects_last_unmasked() {
+        let (hidden, mask) = synthetic();
+        let out = pool(&hidden, &mask, 2, 3, 2, Pooling::LastToken);
+        // row0 last unmasked = s2 → (5,6); row1 last unmasked = s0 → (10,20)
+        assert_eq!(out, vec![5.0, 6.0, 10.0, 20.0]);
+    }
+
+    #[test]
+    fn last_token_does_not_select_last_column_when_padded() {
+        // Right-padded: last column is pad; must not return pad embedding.
+        let hidden = vec![
+            1.0, 2.0, // s0 real
+            3.0, 4.0, // s1 pad
+        ];
+        let mask = vec![1u32, 0];
+        let out = pool(&hidden, &mask, 1, 2, 2, Pooling::LastToken);
+        assert_eq!(out, vec![1.0, 2.0]);
+        assert_ne!(out, vec![3.0, 4.0], "must not pick last column pad");
+    }
+
+    #[test]
+    fn cls_selects_first_token() {
+        let (hidden, mask) = synthetic();
+        let out = pool(&hidden, &mask, 2, 3, 2, Pooling::Cls);
+        assert_eq!(out, vec![1.0, 2.0, 10.0, 20.0]);
     }
 }
