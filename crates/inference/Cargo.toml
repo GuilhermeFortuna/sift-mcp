@@ -6,10 +6,11 @@ publish = false
 
 [features]
 default = []
-cuda = ["dep:ort"]
+cuda = ["dep:ort", "dep:cudarc"]
 
 [dependencies]
 half = { workspace = true }
+cudarc = { workspace = true, optional = true }
 ort = { workspace = true, optional = true, features = ["cuda", "half"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

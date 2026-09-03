@@ -22,6 +22,7 @@ edition = "2024"
 
 [workspace.dependencies]
 ort = "2.0.0-rc.13"
+cudarc = { version = "0.19.9", default-features = false, features = ["std", "cublas", "driver", "f16", "fallback-dynamic-loading"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 memmap2 = "0.9"
 half = "2"

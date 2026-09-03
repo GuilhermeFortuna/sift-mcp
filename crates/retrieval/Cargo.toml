@@ -4,12 +4,17 @@ version = "0.1.0"
 edition.workspace = true
 publish = false
 
+[features]
+default = []
+cuda = ["inference/cuda"]
+
 [dependencies]
+half = { workspace = true }
+inference = { path = "../inference" }
 storage = { path = "../storage" }
 tantivy = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-half = { workspace = true }
 insta = { workspace = true }
 tempfile = { workspace = true }
