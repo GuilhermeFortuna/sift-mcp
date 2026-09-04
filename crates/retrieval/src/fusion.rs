@@ -172,4 +172,84 @@ mod tests {
         let order: Vec<u64> = fused.iter().map(|r| r.row.get()).collect();
         assert_eq!(order, vec![10, 30, 20, 40]);
     }
+
+    #[test]
+    fn union_beats_single_list_rank_two() {
+        let config = FusionConfig {
+            lexical_depth: 50,
+            dense_depth: 50,
+            rrf_k: 60.0,
+        };
+        // Row 5 appears at rank 5 in both lists: 1/65 + 1/65 = 2/65 ≈ 0.030769
+        // Row 2 appears at rank 2 in lexical only: 1/62 ≈ 0.016129
+        // Union (both lists) outranks a stronger single-list standing.
+        let lexical = vec![
+            scored(11, 10.0),
+            scored(2, 9.0),
+            scored(12, 8.0),
+            scored(13, 7.0),
+            scored(5, 6.0),
+        ];
+        let dense = vec![
+            scored(21, 0.9),
+            scored(22, 0.8),
+            scored(23, 0.7),
+            scored(24, 0.6),
+            scored(5, 0.5),
+        ];
+
+        let fused = fuse(&lexical, &dense, &config);
+        let both = fused
+            .iter()
+            .find(|r| r.row.get() == 5)
+            .expect("row 5 present");
+        let single = fused
+            .iter()
+            .find(|r| r.row.get() == 2)
+            .expect("row 2 present");
+
+        let both_expected = 1.0 / 65.0 + 1.0 / 65.0;
+        let single_expected = 1.0 / 62.0;
+        assert!((both.fused_score - both_expected).abs() < 1e-6);
+        assert!((single.fused_score - single_expected).abs() < 1e-6);
+        assert!(
+            both.fused_score > single.fused_score,
+            "dual rank-5 ({}) should beat single rank-2 ({})",
+            both.fused_score,
+            single.fused_score
+        );
+
+        let both_pos = fused.iter().position(|r| r.row.get() == 5).unwrap();
+        let single_pos = fused.iter().position(|r| r.row.get() == 2).unwrap();
+        assert!(both_pos < single_pos);
+    }
+
+    #[test]
+    fn tied_fused_scores_order_by_ascending_row_id() {
+        let config = FusionConfig {
+            lexical_depth: 50,
+            dense_depth: 50,
+            rrf_k: 60.0,
+        };
+        // Identical contributions: both lexical-only at rank 1 across separate
+        // queries would each score 1/61; here two rows each appear only in
+        // one list at the same rank so fused_score ties.
+        let lexical = vec![scored(7, 1.0)];
+        let dense = vec![scored(3, 1.0)];
+        let fused = fuse(&lexical, &dense, &config);
+        assert_eq!(fused.len(), 2);
+        assert!((fused[0].fused_score - fused[1].fused_score).abs() < 1e-6);
+        assert_eq!(fused[0].row.get(), 3);
+        assert_eq!(fused[1].row.get(), 7);
+    }
+
+    #[test]
+    fn fuse_is_deterministic_across_repeated_runs() {
+        let config = FusionConfig::default();
+        let lexical = vec![scored(5, 2.0), scored(1, 1.5), scored(9, 1.0)];
+        let dense = vec![scored(9, 0.9), scored(2, 0.8), scored(5, 0.7)];
+        let first = fuse(&lexical, &dense, &config);
+        let second = fuse(&lexical, &dense, &config);
+        assert_eq!(first, second);
+    }
 }
