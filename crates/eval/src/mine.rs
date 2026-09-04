@@ -222,10 +222,199 @@ pub fn mine_commits(
 
 /// Docstring labels. The held-out set the index must be built without.
 pub fn mine_docstrings(
-    _repo: &Path,
-    _store: &ChunkStore,
+    repo_path: &Path,
+    store: &ChunkStore,
 ) -> Result<(Vec<Label>, MiningReport), EvalError> {
-    todo!("mine_docstrings")
+    let mut report = MiningReport::new();
+    let mut labels = Vec::new();
+
+    // Prefer live store metadata when present; also walk the worktree so a
+    // freshly indexed docstring corpus is complete.
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    for row in store
+        .live_rows()
+        .map_err(|e| EvalError::Store(e.to_string()))?
+    {
+        report.commits_examined += 1;
+        let Some(rec) = store
+            .get(row)
+            .map_err(|e| EvalError::Store(e.to_string()))?
+        else {
+            continue;
+        };
+        if rec.symbol == "<file_prelude>" {
+            continue;
+        }
+        let Some(doc) = rec.doc_first_line.clone() else {
+            report.reject(&RejectReason::NoSymbolsTouched);
+            continue;
+        };
+        let key = (rec.file.clone(), rec.symbol.clone());
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        labels.push(Label {
+            query: doc,
+            expected: vec![key.clone()],
+            source: LabelSource::Docstring,
+            provenance: format!("{}:{}", key.0, key.1),
+        });
+        report.labels_accepted += 1;
+    }
+
+    // Also discover docs from the worktree in case the store was held-out.
+    let mut chunker = Chunker::new().map_err(|e| EvalError::Index(e.to_string()))?;
+    for path in list_source_files(repo_path)? {
+        let rel = path
+            .strip_prefix(repo_path)
+            .unwrap_or(path.as_path())
+            .to_string_lossy()
+            .replace('\\', "/");
+        let Some(lang) = Language::from_path(&path) else {
+            continue;
+        };
+        let text = std::fs::read_to_string(&path)?;
+        let chunks = chunker.chunk_file(&rel, lang, &text);
+        for chunk in chunks.chunks {
+            if chunk.record.symbol == "<file_prelude>" {
+                continue;
+            }
+            let Some(doc) = chunk.record.doc_first_line.clone() else {
+                continue;
+            };
+            let key = (chunk.record.file.clone(), chunk.record.symbol.clone());
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            report.commits_examined += 1;
+            labels.push(Label {
+                query: doc,
+                expected: vec![key.clone()],
+                source: LabelSource::Docstring,
+                provenance: format!("{}:{}", key.0, key.1),
+            });
+            report.labels_accepted += 1;
+        }
+    }
+
+    labels.sort_by(|a, b| a.provenance.cmp(&b.provenance));
+    Ok((labels, report))
+}
+
+/// Strip doc-comment lines so docstring queries are not present in the index.
+pub fn strip_doc_comments(body: &str) -> String {
+    body.lines()
+        .filter(|line| !is_doc_comment_line(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_doc_comment_line(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("///") || t.starts_with("//!")
+}
+
+/// Build a store + lexical index with documentation held out of bodies and fields.
+pub fn build_held_out_index(
+    repo_path: &Path,
+    store_dir: &Path,
+    embedder: &dyn inference::Embedder,
+) -> Result<ChunkStore, EvalError> {
+    use inference::Role;
+    use retrieval::{LexicalDoc, LexicalIndex};
+    use storage::ChunkRecord;
+
+    let mut store = ChunkStore::create(store_dir, embedder.dims(), embedder.model_id())
+        .map_err(|e| EvalError::Store(e.to_string()))?;
+    let mut lexical =
+        LexicalIndex::open(store_dir).map_err(|e| EvalError::Retrieval(e.to_string()))?;
+    let mut chunker = Chunker::new().map_err(|e| EvalError::Index(e.to_string()))?;
+
+    let mut pending_records: Vec<ChunkRecord> = Vec::new();
+    let mut pending_bodies: Vec<String> = Vec::new();
+
+    for path in list_source_files(repo_path)? {
+        let rel = path
+            .strip_prefix(repo_path)
+            .unwrap_or(path.as_path())
+            .to_string_lossy()
+            .replace('\\', "/");
+        let Some(lang) = Language::from_path(&path) else {
+            continue;
+        };
+        let text = std::fs::read_to_string(&path)?;
+        let chunks = chunker.chunk_file(&rel, lang, &text);
+        for mut chunk in chunks.chunks {
+            chunk.record.doc_first_line = None;
+            let body = strip_doc_comments(&chunk.body);
+            if body.trim().is_empty() {
+                continue;
+            }
+            pending_records.push(chunk.record);
+            pending_bodies.push(body);
+        }
+    }
+
+    if pending_bodies.is_empty() {
+        return Ok(store);
+    }
+
+    let text_refs: Vec<&str> = pending_bodies.iter().map(|s| s.as_str()).collect();
+    let embeddings = embedder
+        .embed(&text_refs, Role::Document)
+        .map_err(|e| EvalError::message(e.to_string()))?;
+
+    let batch: Vec<_> = pending_records
+        .iter()
+        .cloned()
+        .zip(embeddings.into_iter().map(|e| e.vector))
+        .collect();
+    let ids = store
+        .insert_batch(&batch)
+        .map_err(|e| EvalError::Store(e.to_string()))?;
+
+    let docs: Vec<_> = pending_records
+        .iter()
+        .zip(pending_bodies.iter())
+        .map(|(rec, body)| LexicalDoc {
+            symbol: rec.symbol.clone(),
+            signature: rec.signature.clone(),
+            doc_first_line: None,
+            file: rec.file.clone(),
+            body: body.clone(),
+        })
+        .collect();
+    lexical
+        .add_batch(&ids.into_iter().zip(docs).collect::<Vec<_>>())
+        .map_err(|e| EvalError::Retrieval(e.to_string()))?;
+    lexical
+        .commit()
+        .map_err(|e| EvalError::Retrieval(e.to_string()))?;
+
+    Ok(store)
+}
+
+fn list_source_files(repo_path: &Path) -> Result<Vec<std::path::PathBuf>, EvalError> {
+    let mut out = Vec::new();
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name();
+            if name == ".git" || name == "target" || name == "node_modules" {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, out)?;
+            } else {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+    walk(repo_path, &mut out)?;
+    out.sort();
+    Ok(out)
 }
 
 fn compile_maintenance(patterns: &[String]) -> Result<Vec<(String, Regex)>, EvalError> {
@@ -658,5 +847,43 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    #[test]
+    fn docstring_labels_are_held_out_of_lexical_index() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-b", "main"]);
+        git(p, &["config", "user.email", "test@example.com"]);
+        git(p, &["config", "user.name", "Test"]);
+        git(p, &["config", "commit.gpgsign", "false"]);
+
+        const PHRASE: &str = "UNIQUE_DOCSTRING_PHRASE_XYZ_HOLD_OUT";
+        let src = format!(
+            "/// {PHRASE}\npub fn documented_helper() {{\n    let x = 1;\n}}\n"
+        );
+        write(p, "doc.rs", &src);
+        commit(p, "Add documented helper with unique phrase");
+
+        let (_store_dir, store) = index_repo(p);
+        let (labels, _) = mine_docstrings(p, &store).unwrap();
+        assert!(
+            labels.iter().any(|l| {
+                l.query.contains(PHRASE)
+                    && l.expected.iter().any(|(f, s)| f == "doc.rs" && s == "documented_helper")
+            }),
+            "expected docstring label, got {labels:?}"
+        );
+
+        let held_dir = TempDir::new().unwrap();
+        let embedder = MockEmbedder::new(DIMS);
+        build_held_out_index(p, held_dir.path(), &embedder).unwrap();
+        let lexical = retrieval::LexicalIndex::open(held_dir.path()).unwrap();
+        let hits = lexical.search(PHRASE, 10).unwrap();
+        assert!(
+            hits.is_empty(),
+            "held-out index must not retrieve by docstring phrase, got {} hits",
+            hits.len()
+        );
     }
 }

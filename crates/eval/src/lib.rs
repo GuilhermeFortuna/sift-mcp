@@ -12,5 +12,6 @@ pub use corpus::{
 pub use error::EvalError;
 pub use metrics::{BytesBeforeHit, Metrics, percentile, reciprocal_rank, top_k_accuracy};
 pub use mine::{
-    Label, LabelSource, MiningConfig, MiningReport, RejectReason, mine_commits, mine_docstrings,
+    Label, LabelSource, MiningConfig, MiningReport, RejectReason, build_held_out_index,
+    mine_commits, mine_docstrings, strip_doc_comments,
 };
