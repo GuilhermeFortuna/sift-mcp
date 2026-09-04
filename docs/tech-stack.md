@@ -130,3 +130,45 @@ CUDA. CI runs against a mock; GPU tests are `#[ignore]` and run locally.
 - Storage: SQLite → anything; the schema is four tables.
 
 None of these are expected within the RTX 2060's useful life.
+
+---
+
+## Local console — UI series, Batch 01
+
+The separately authorized UI series adds observability, multiple-repository
+operations, and search inspection. Its task pairs and dependencies are tracked
+only in [the development ledger](development/STATUS.md#ui-series--batch-01-local-console).
+This is not SIFT Batch 02 and does not change the Phase 2 retrieval gate.
+
+| Concern | Decision | Reason |
+| --- | --- | --- |
+| Browser application | React, TypeScript, Vite | Interactive screens compiled to static assets |
+| Components | shadcn/ui with Base UI, Tailwind CSS, Lucide | Shared accessible controls with recorded upstream provenance |
+| Server state/navigation | TanStack Query, React Router | Scoped query caching, refresh, and addressable views |
+| Charts | Recharts | Request, latency, and resource series with accessible summaries |
+| Local service | Rust, Axum, existing Tokio runtime | Loopback browser API bridged to existing Unix sockets |
+| History | SQLite through rusqlite | Bounded persistent metadata with no separate database service |
+| Live updates | Server-Sent Events | Status/activity/progress invalidation with reconnect snapshots |
+| Build/test | pnpm, Vitest, Playwright, existing ci.sh | Locked frontend builds and browser checks within the single validation entry point |
+| Distribution | Rust executable plus adjacent frontend assets | No Node.js or Python runtime; ordinary Cargo builds do not require generated frontend assets |
+
+The Rust-only server-runtime decision remains in force; TypeScript executes in
+the browser and Node.js is build/test tooling only. The console does not load
+inference, tokenizer, or search-index dependencies. GPU sampling stays inside
+the inference abstraction and its optional CUDA boundary. Observer traffic must
+not keep a daemon or GPU allocation alive. Missing resource data is unavailable,
+not zero, and device-wide memory is never presented as model-attributable memory.
+
+Registrations and seven-day, capped metadata history remain local. The browser
+service binds only to loopback and applies same-origin/action-forgery defenses.
+Only explicit operations may start daemons. No remote hosting, automatic
+indexing, source-content history, ranking change, or Phase 1 acceptance claim is
+introduced by the console.
+
+Implementation resolves and locks compatible package versions and preserves
+third-party notices. Primary references: [Vite static deployment](https://vite.dev/guide/static-deploy.html),
+[shadcn Vite setup](https://ui.shadcn.com/docs/installation/vite),
+[shadcn license](https://github.com/shadcn-ui/ui/blob/main/LICENSE.md),
+[Axum SSE](https://docs.rs/axum/latest/axum/response/sse/),
+[TanStack Query](https://tanstack.com/query/latest/docs/framework/react/overview),
+and [Recharts](https://recharts.org/).

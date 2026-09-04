@@ -54,3 +54,24 @@ the languages this project will actually be pointed at and scale with symbol
 count rather than commit count. Results are reported per corpus, never merged.
 No third-party content is committed here; labels regenerate from the pinned
 revision.
+
+## UI series — Batch 01: Local console
+
+The UI series is separately authorized and uses its own `UI-` prefix and Batch
+01. It is not SIFT Batch 02 and does not depend on or authorize Phase 2 retrieval
+planning. The existing SIFT-013 baseline gate and all hardware/human acceptance
+requirements remain unchanged. Cross-series dependencies below are deliberate;
+planning the UI series does not authorize completing SIFT remediation tasks.
+
+| ID | Batch | Status | Depends on | Deliverable |
+| --- | --- | --- | --- | --- |
+| [UI-001](specs/UI-001-daemon-observability-spec.md) / [Plan](plans/UI-001-daemon-observability-plan.md) | 01 | `BLOCKED` | SIFT-010, SIFT-011, SIFT-015 | Passive daemon observation, safe request events, indexing snapshots, and truthful resource measurements |
+| [UI-002](specs/UI-002-console-service-spec.md) / [Plan](plans/UI-002-console-service-plan.md) | 01 | `BLOCKED` | UI-001 | Local Rust HTTP service, repository registry, bounded history, action API, live updates, and frontend foundation |
+| [UI-003](specs/UI-003-observability-ui-spec.md) / [Plan](plans/UI-003-observability-ui-plan.md) | 01 | `BLOCKED` | UI-002 | Shared application shell, Overview, and Activity with accessible live diagnostic views |
+| [UI-004](specs/UI-004-repository-operations-ui-spec.md) / [Plan](plans/UI-004-repository-operations-ui-plan.md) | 01 | `BLOCKED` | UI-003 | Registration, honest freshness inspection, explicit start/update/rebuild, and durable progress views |
+| [UI-005](specs/UI-005-search-lab-ui-spec.md) / [Plan](plans/UI-005-search-lab-ui-plan.md) | 01 | `BLOCKED` | UI-004 | Query/snippet search, symbol inspection, complete-console validation, and local distribution |
+
+UI task branches use `UI-NNN-slug`, one implementation task per branch. Every
+task has a code-free spec and an implementation-free plan. UI-001 cannot begin
+until SIFT-015 meets this ledger's dependency contract. Owner-only acceptance
+is recorded explicitly rather than inferred from CPU fixtures or compilation.
