@@ -913,4 +913,68 @@ mod tests {
         assert!(response.results[0].lexical_score.is_none());
         assert!(response.results[0].dense_score.is_some());
     }
+
+    #[test]
+    fn results_never_carry_full_file_or_body_past_preview() {
+        let dir = tempdir().unwrap();
+        let embedder = MockEmbedder::new(DIMS);
+        let large_body = format!(
+            "{}\n{}",
+            "fn huge() {\n",
+            "x".repeat(PREVIEW_MAX_BYTES * 4)
+        );
+        let whole_file = format!(
+            "// file header\n{large_body}\nfn other() {{}}\n{}",
+            "y".repeat(2000)
+        );
+        assert!(whole_file.len() > PREVIEW_MAX_BYTES);
+
+        let embeddings = embedder
+            .embed(&[large_body.as_str()], Role::Document)
+            .unwrap();
+        let mut store = ChunkStore::create(dir.path(), DIMS, embedder.model_id()).unwrap();
+        let rows = store
+            .insert_batch(&[(
+                record("huge", "src/huge.rs", &large_body),
+                embeddings[0].vector.clone(),
+            )])
+            .unwrap();
+        let mut lexical = LexicalIndex::open(dir.path()).unwrap();
+        lexical
+            .add_batch(&[(
+                rows[0],
+                LexicalDoc {
+                    symbol: "huge".into(),
+                    signature: "fn huge()".into(),
+                    doc_first_line: None,
+                    file: "src/huge.rs".into(),
+                    body: large_body.clone(),
+                },
+            )])
+            .unwrap();
+        lexical.commit().unwrap();
+        let dense = DenseIndex::from_store(&store, DenseBackend::Cpu).unwrap();
+
+        let searcher = Searcher::new(&lexical, &dense, &store, &embedder);
+        let response = searcher
+            .search("huge", 5, &FusionConfig::default())
+            .unwrap();
+        assert!(!response.results.is_empty());
+        for result in &response.results {
+            assert!(
+                result.preview.len() <= PREVIEW_MAX_BYTES,
+                "preview {} exceeds bound",
+                result.preview.len()
+            );
+            assert_ne!(result.preview, whole_file);
+            assert!(
+                result.preview.len() < large_body.len(),
+                "preview must not be the full symbol body"
+            );
+            // Serialized JSON must not embed the full body either.
+            let json = serde_json::to_string(result).unwrap();
+            assert!(!json.contains(&large_body));
+            assert!(json.len() < whole_file.len());
+        }
+    }
 }
