@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn metadata_resolved_with_one_get_many_per_search() {
-        let mut fixture = build_fixture();
+        let fixture = build_fixture();
         let _ = fixture.store.take_statements_prepared();
 
         let searcher = Searcher::new(
@@ -646,5 +646,79 @@ mod tests {
         fixture.store.get_many(&rows).unwrap();
         let direct = fixture.store.take_statements_prepared();
         assert_eq!(first, direct);
+    }
+
+    #[test]
+    fn degrades_when_one_retriever_fails() {
+        let fixture = build_fixture();
+        let config = FusionConfig::default();
+
+        let dense_failed = Searcher::new(
+            &fixture.lexical,
+            &fixture.dense,
+            &fixture.store,
+            &fixture.embedder,
+        )
+        .with_forced_dense_error("dense exploded");
+        let response = dense_failed
+            .search("clamp_decoder_timestamps", 5, &config)
+            .expect("degraded search must return Ok");
+        assert!(response.diagnostics.lexical_ok);
+        assert!(!response.diagnostics.dense_ok);
+        assert!(
+            response
+                .diagnostics
+                .dense_error
+                .as_deref()
+                .is_some_and(|e| e.contains("dense exploded"))
+        );
+        assert!(
+            !response.results.is_empty(),
+            "lexical-only results expected"
+        );
+
+        let lexical_failed = Searcher::new(
+            &fixture.lexical,
+            &fixture.dense,
+            &fixture.store,
+            &fixture.embedder,
+        )
+        .with_forced_lexical_error("lexical exploded");
+        let response = lexical_failed
+            .search("clamp_decoder_timestamps", 5, &config)
+            .expect("degraded search must return Ok");
+        assert!(!response.diagnostics.lexical_ok);
+        assert!(response.diagnostics.dense_ok);
+        assert!(
+            response
+                .diagnostics
+                .lexical_error
+                .as_deref()
+                .is_some_and(|e| e.contains("lexical exploded"))
+        );
+        assert!(!response.results.is_empty(), "dense-only results expected");
+    }
+
+    #[test]
+    fn both_retrievers_failing_returns_error() {
+        let fixture = build_fixture();
+        let searcher = Searcher::new(
+            &fixture.lexical,
+            &fixture.dense,
+            &fixture.store,
+            &fixture.embedder,
+        )
+        .with_forced_lexical_error("lexical down")
+        .with_forced_dense_error("dense down");
+        let err = searcher
+            .search("clamp_decoder_timestamps", 5, &FusionConfig::default())
+            .expect_err("both failing must be Err");
+        match err {
+            crate::RetrievalError::BothRetrieversFailed { lexical, dense } => {
+                assert!(lexical.contains("lexical down"));
+                assert!(dense.contains("dense down"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 }
