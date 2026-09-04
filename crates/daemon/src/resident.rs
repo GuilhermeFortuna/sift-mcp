@@ -448,6 +448,7 @@ impl FrozenSearch {
             top_k,
             fusion,
             Role::Query,
+            true,
         )
     }
 
@@ -468,6 +469,7 @@ impl FrozenSearch {
             top_k,
             fusion,
             Role::Document,
+            false,
         )
     }
 
@@ -522,6 +524,7 @@ fn search_with_parts(
     top_k: usize,
     fusion: &FusionConfig,
     role: Role,
+    run_lexical: bool,
 ) -> Result<SearchResponse, DaemonError> {
     let total = Instant::now();
     let embed_started = Instant::now();
@@ -529,12 +532,16 @@ fn search_with_parts(
     let embed_millis = embed_started.elapsed().as_millis() as u64;
     let vector = &embedded[0].vector;
 
-    let lex_started = Instant::now();
-    let (lexical_rows, lexical_error) = match lexical.search(text, fusion.lexical_depth) {
-        Ok(rows) => (rows, None),
-        Err(e) => (Vec::new(), Some(e.to_string())),
+    let (lexical_rows, lexical_error, lexical_millis) = if run_lexical {
+        let lex_started = Instant::now();
+        let (rows, error) = match lexical.search(text, fusion.lexical_depth) {
+            Ok(rows) => (rows, None),
+            Err(e) => (Vec::new(), Some(e.to_string())),
+        };
+        (rows, error, lex_started.elapsed().as_millis() as u64)
+    } else {
+        (Vec::new(), None, 0)
     };
-    let lexical_millis = lex_started.elapsed().as_millis() as u64;
 
     let dense_started = Instant::now();
     let (dense_rows, dense_error) =

@@ -32,3 +32,4 @@ required-features = ["cuda"]
 
 [[example]]
 name = "proxy_kpi"
+required-features = ["cuda"]
