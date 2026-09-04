@@ -721,4 +721,100 @@ mod tests {
             other => panic!("unexpected error: {other}"),
         }
     }
+
+    #[test]
+    fn exact_identifier_recovered_via_lexical_despite_poor_dense() {
+        let dir = tempdir().unwrap();
+        let embedder = MockEmbedder::new(DIMS);
+        // Dense-friendly distractors use bodies near the query embedding space;
+        // the defining chunk uses an unrelated body so dense ranks it poorly.
+        let identifier = "parseHTTPResponse";
+        let mut texts = vec![
+            "return status from parsed headers".to_string(), // defining body (dissimilar)
+        ];
+        for i in 0..8 {
+            texts.push(format!("{identifier} distractor body variant {i}"));
+        }
+        let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let embeddings = embedder.embed(&text_refs, Role::Document).unwrap();
+
+        let mut store = ChunkStore::create(dir.path(), DIMS, embedder.model_id()).unwrap();
+        let mut chunks = Vec::new();
+        chunks.push((
+            record(identifier, "src/http.rs", &texts[0]),
+            embeddings[0].vector.clone(),
+        ));
+        for i in 1..texts.len() {
+            let symbol = format!("distractor{i}");
+            chunks.push((
+                record(&symbol, &format!("src/{symbol}.rs"), &texts[i]),
+                embeddings[i].vector.clone(),
+            ));
+        }
+        let rows = store.insert_batch(&chunks).unwrap();
+
+        let mut docs = vec![(
+            rows[0],
+            LexicalDoc {
+                symbol: identifier.into(),
+                signature: format!("fn {identifier}()"),
+                doc_first_line: Some("Parse an HTTP response".into()),
+                file: "src/http.rs".into(),
+                body: texts[0].clone(),
+            },
+        )];
+        for i in 1..texts.len() {
+            let symbol = format!("distractor{i}");
+            docs.push((
+                rows[i],
+                LexicalDoc {
+                    symbol: symbol.clone(),
+                    signature: format!("fn {symbol}()"),
+                    doc_first_line: None,
+                    file: format!("src/{symbol}.rs"),
+                    body: texts[i].clone(),
+                },
+            ));
+        }
+        let mut lexical = LexicalIndex::open(dir.path()).unwrap();
+        lexical.add_batch(&docs).unwrap();
+        lexical.commit().unwrap();
+        let dense = DenseIndex::from_store(&store, DenseBackend::Cpu).unwrap();
+
+        // Confirm dense alone ranks the defining chunk poorly (outside top 5).
+        let query_vec = embedder.embed(&[identifier], Role::Query).unwrap()[0]
+            .vector
+            .clone();
+        let dense_only = dense.search(&query_vec, embedder.model_id(), 9).unwrap();
+        let dense_rank = dense_only.iter().position(|r| r.row == rows[0]);
+        assert!(
+            dense_rank.is_none_or(|rank| rank >= 5),
+            "dense should rank identifier poorly, got {dense_rank:?}"
+        );
+
+        let searcher = Searcher::new(&lexical, &dense, &store, &embedder);
+        let response = searcher
+            .search(identifier, 5, &FusionConfig::default())
+            .unwrap();
+        let found = response
+            .results
+            .iter()
+            .take(5)
+            .any(|r| r.symbol == identifier);
+        assert!(
+            found,
+            "lexical contribution must surface {identifier} in top 5; got {:?}",
+            response
+                .results
+                .iter()
+                .map(|r| r.symbol.as_str())
+                .collect::<Vec<_>>()
+        );
+        let hit = response
+            .results
+            .iter()
+            .find(|r| r.symbol == identifier)
+            .unwrap();
+        assert!(hit.lexical_score.is_some());
+    }
 }
