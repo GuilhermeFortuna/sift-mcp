@@ -817,4 +817,100 @@ mod tests {
             .unwrap();
         assert!(hit.lexical_score.is_some());
     }
+
+    struct RecordingEmbedder {
+        inner: MockEmbedder,
+        roles: std::sync::Mutex<Vec<Role>>,
+    }
+
+    impl RecordingEmbedder {
+        fn new(dims: u32) -> Self {
+            Self {
+                inner: MockEmbedder::new(dims),
+                roles: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Embedder for RecordingEmbedder {
+        fn model_id(&self) -> &str {
+            self.inner.model_id()
+        }
+
+        fn dims(&self) -> u32 {
+            self.inner.dims()
+        }
+
+        fn embed(
+            &self,
+            texts: &[&str],
+            role: Role,
+        ) -> Result<Vec<inference::Embedding>, inference::InferError> {
+            self.roles.lock().unwrap().push(role);
+            self.inner.embed(texts, role)
+        }
+    }
+
+    #[test]
+    fn search_similar_uses_document_role_and_ranks_snippet() {
+        let dir = tempdir().unwrap();
+        let embedder = RecordingEmbedder::new(DIMS);
+        let texts = [
+            "alpha packet parser body",
+            "let mut t = pts; if t < last { t = last + 1; }",
+            "gamma renderer body",
+        ];
+        let symbols = ["alpha", "normalize_timestamp", "gamma"];
+        let embeddings = embedder.embed(&texts, Role::Document).unwrap();
+        embedder.roles.lock().unwrap().clear();
+
+        let mut store = ChunkStore::create(dir.path(), DIMS, embedder.model_id()).unwrap();
+        let chunks: Vec<_> = texts
+            .iter()
+            .zip(embeddings)
+            .enumerate()
+            .map(|(i, (text, embedding))| {
+                (
+                    record(symbols[i], &format!("src/{}.rs", symbols[i]), text),
+                    embedding.vector,
+                )
+            })
+            .collect();
+        let rows = store.insert_batch(&chunks).unwrap();
+        let docs: Vec<_> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, text)| {
+                (
+                    rows[i],
+                    LexicalDoc {
+                        symbol: symbols[i].into(),
+                        signature: format!("fn {}()", symbols[i]),
+                        doc_first_line: None,
+                        file: format!("src/{}.rs", symbols[i]),
+                        body: (*text).into(),
+                    },
+                )
+            })
+            .collect();
+        let mut lexical = LexicalIndex::open(dir.path()).unwrap();
+        lexical.add_batch(&docs).unwrap();
+        lexical.commit().unwrap();
+        let dense = DenseIndex::from_store(&store, DenseBackend::Cpu).unwrap();
+
+        let searcher = Searcher::new(&lexical, &dense, &store, &embedder);
+        let snippet = texts[1];
+        let response = searcher
+            .search_similar(snippet, 3, &FusionConfig::default())
+            .unwrap();
+
+        assert_eq!(response.results[0].symbol, "normalize_timestamp");
+        assert!(response.diagnostics.lexical_ok);
+        assert!(response.diagnostics.dense_ok);
+        let roles = embedder.roles.lock().unwrap().clone();
+        assert_eq!(roles, vec![Role::Document]);
+        // Lexical path skipped: no lexical scores on similar search.
+        assert!(response.results[0].lexical_score.is_none());
+        assert!(response.results[0].dense_score.is_some());
+    }
 }
