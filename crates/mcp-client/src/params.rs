@@ -106,7 +106,7 @@ impl Validate for IndexRepositoryParams {
 }
 
 fn validate_top_k(top_k: usize) -> Result<(), ParamError> {
-    if top_k < 1 || top_k > TOP_K_MAX {
+    if !(1..=TOP_K_MAX).contains(&top_k) {
         return Err(ParamError(format!(
             "top_k out of range: must be 1..={TOP_K_MAX} (got {top_k})"
         )));
