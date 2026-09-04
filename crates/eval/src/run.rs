@@ -536,4 +536,26 @@ mod tests {
         );
         assert_eq!(run.by_source[&LabelSource::Docstring].labels_scored, 1);
     }
+
+    #[test]
+    fn run_manifest_round_trips_with_harness_version() {
+        let manifest = RunManifest {
+            repo_commit: "abc123".into(),
+            indexed_commit: "def456".into(),
+            model_id: "mock".into(),
+            fusion: FusionConfig::default().into(),
+            harness_version: HARNESS_VERSION,
+            label_set: "mined".into(),
+            timestamp: "2026-01-01T00:00:00Z".into(),
+        };
+        assert_eq!(manifest.harness_version, HARNESS_VERSION);
+        let json = serde_json::to_string_pretty(&manifest).unwrap();
+        let back: RunManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, manifest);
+        assert!(json.contains("repo_commit"));
+        assert!(json.contains("indexed_commit"));
+        assert!(json.contains("model_id"));
+        assert!(json.contains("harness_version"));
+        assert!(json.contains("lexical_depth"));
+    }
 }
