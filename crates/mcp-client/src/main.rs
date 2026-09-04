@@ -8,7 +8,10 @@ use mcp_client::{SiftMcpConfig, SiftMcpServer};
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--print-tool-descriptions") {
-        println!("DESCRIPTIONS_VERSION={}", mcp_client::tools::DESCRIPTIONS_VERSION);
+        println!(
+            "DESCRIPTIONS_VERSION={}",
+            mcp_client::tools::DESCRIPTIONS_VERSION
+        );
         for d in descriptions() {
             println!("=== {} ===", d.name);
             print!("{}", rendered(d.name));
