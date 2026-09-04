@@ -631,4 +631,32 @@ mod tests {
         );
         assert!(report.reconciles());
     }
+
+    #[test]
+    fn mining_same_history_twice_is_byte_identical() {
+        let repo = build_mining_fixture();
+        let (_dir, store) = index_repo(repo.path());
+        let (a, _) = mine_commits(repo.path(), &store, &test_config()).unwrap();
+        let (b, _) = mine_commits(repo.path(), &store, &test_config()).unwrap();
+        let json_a = serde_json::to_string(&label_snapshot(&a)).unwrap();
+        let json_b = serde_json::to_string(&label_snapshot(&b)).unwrap();
+        assert_eq!(json_a, json_b);
+    }
+
+    fn label_snapshot(labels: &[Label]) -> Vec<serde_json::Value> {
+        labels
+            .iter()
+            .map(|l| {
+                serde_json::json!({
+                    "query": l.query,
+                    "expected": l.expected,
+                    "source": match l.source {
+                        LabelSource::CommitSubject => "commit_subject",
+                        LabelSource::Docstring => "docstring",
+                    },
+                    "provenance": l.provenance,
+                })
+            })
+            .collect()
+    }
 }
