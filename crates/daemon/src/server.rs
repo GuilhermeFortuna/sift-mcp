@@ -231,19 +231,18 @@ async fn handle_connection(
     let mut reader = tokio::io::BufReader::new(reader);
 
     // Provisional handshake deadline: incomplete Hello must not pin residency.
-    let hello_env = match read_envelope_until(&mut reader, &state, PROVISIONAL_HANDSHAKE_TIMEOUT)
-        .await
-    {
-        Ok(Some(env)) => env,
-        Ok(None) => return Ok(None),
-        Err(DaemonError::Malformed { detail }) if detail.contains("truncated") => {
-            return Ok(None);
-        }
-        Err(e) => {
-            let _ = write_response(&mut writer, 0, Response::Error(e.clone())).await;
-            return Ok(None);
-        }
-    };
+    let hello_env =
+        match read_envelope_until(&mut reader, &state, PROVISIONAL_HANDSHAKE_TIMEOUT).await {
+            Ok(Some(env)) => env,
+            Ok(None) => return Ok(None),
+            Err(DaemonError::Malformed { detail }) if detail.contains("truncated") => {
+                return Ok(None);
+            }
+            Err(e) => {
+                let _ = write_response(&mut writer, 0, Response::Error(e.clone())).await;
+                return Ok(None);
+            }
+        };
 
     let request_id = hello_env.request_id;
     let req_type = request_type_name(&hello_env.payload);
@@ -322,30 +321,25 @@ async fn handle_connection(
         if *state.shutting_down.lock() {
             break;
         }
-        let env: Envelope<Request> = match read_envelope_until(
-            &mut reader,
-            &state,
-            Duration::from_secs(3600),
-        )
-        .await
-        {
-            Ok(Some(e)) => e,
-            Ok(None) => break,
-            Err(DaemonError::Malformed { detail }) if detail.contains("truncated") => {
-                break;
-            }
-            Err(e) => {
-                let resp = Response::Error(e.clone());
-                write_response(&mut writer, 0, resp).await?;
-                if matches!(
-                    e,
-                    DaemonError::RequestTooLarge { .. } | DaemonError::Malformed { .. }
-                ) {
-                    continue;
+        let env: Envelope<Request> =
+            match read_envelope_until(&mut reader, &state, Duration::from_secs(3600)).await {
+                Ok(Some(e)) => e,
+                Ok(None) => break,
+                Err(DaemonError::Malformed { detail }) if detail.contains("truncated") => {
+                    break;
                 }
-                break;
-            }
-        };
+                Err(e) => {
+                    let resp = Response::Error(e.clone());
+                    write_response(&mut writer, 0, resp).await?;
+                    if matches!(
+                        e,
+                        DaemonError::RequestTooLarge { .. } | DaemonError::Malformed { .. }
+                    ) {
+                        continue;
+                    }
+                    break;
+                }
+            };
 
         if role == ClientRole::Worker {
             state.touch();
