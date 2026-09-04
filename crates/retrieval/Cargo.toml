@@ -24,3 +24,9 @@ tempfile = { workspace = true }
 [[example]]
 name = "bench_dense"
 required-features = ["cuda"]
+
+[[example]]
+name = "search"
+
+[[example]]
+name = "bench_search"

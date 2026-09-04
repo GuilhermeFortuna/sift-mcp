@@ -6,12 +6,12 @@ use half::f16;
 use inference::{Embedder, Role};
 use storage::{ChunkStore, RowId};
 
+use crate::RetrievalError;
+use crate::ScoredRow;
 use crate::dense::DenseIndex;
 use crate::fusion::{FusionConfig, fuse};
 use crate::lexical::LexicalIndex;
 use crate::result::{SearchResult, preview_from_body};
-use crate::RetrievalError;
-use crate::ScoredRow;
 
 /// Which retrievers ran and which failed. Degradation is data, not a log line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,33 +170,31 @@ impl<'a> Searcher<'a> {
             }
         };
 
-        let (lexical_result, dense_result, lexical_millis, dense_millis) =
-            if self.concurrent && run_lexical {
-                dispatch_concurrent(
-                    self.lexical,
-                    self.dense,
-                    text,
-                    &query_vec,
-                    self.embedder.model_id(),
-                    config,
-                    delay,
-                    force_lexical,
-                    force_dense,
-                )
-            } else {
-                dispatch_sequential(
-                    self.lexical,
-                    self.dense,
-                    text,
-                    &query_vec,
-                    self.embedder.model_id(),
-                    config,
-                    run_lexical,
-                    delay,
-                    force_lexical,
-                    force_dense,
-                )
-            };
+        let hooks = DispatchHooks {
+            delay,
+            force_lexical,
+            force_dense,
+        };
+        let request = DispatchRequest {
+            lexical: self.lexical,
+            dense: self.dense,
+            text,
+            query_vec: &query_vec,
+            model_id: self.embedder.model_id(),
+            config,
+            run_lexical,
+            hooks,
+        };
+
+        let outcome = if self.concurrent && run_lexical {
+            dispatch_concurrent(request)
+        } else {
+            dispatch_sequential(request)
+        };
+        let lexical_result = outcome.lexical;
+        let dense_result = outcome.dense;
+        let lexical_millis = outcome.lexical_millis;
+        let dense_millis = outcome.dense_millis;
 
         let mut lexical_ok = true;
         let mut dense_ok = true;
@@ -276,74 +274,74 @@ fn maybe_force_dense_error(forced: Option<&str>) -> Result<(), RetrievalError> {
     Ok(())
 }
 
-fn dispatch_sequential(
-    lexical: &LexicalIndex,
-    dense: &DenseIndex,
-    text: &str,
-    query_vec: &[f16],
-    model_id: &str,
-    config: &FusionConfig,
+struct DispatchRequest<'a> {
+    lexical: &'a LexicalIndex,
+    dense: &'a DenseIndex,
+    text: &'a str,
+    query_vec: &'a [f16],
+    model_id: &'a str,
+    config: &'a FusionConfig,
     run_lexical: bool,
+    hooks: DispatchHooks<'a>,
+}
+
+struct DispatchHooks<'a> {
     delay: Option<std::time::Duration>,
-    force_lexical: Option<&str>,
-    force_dense: Option<&str>,
-) -> (
-    Result<Vec<ScoredRow>, RetrievalError>,
-    Result<Vec<ScoredRow>, RetrievalError>,
-    u64,
-    u64,
-) {
-    let lexical_result = if run_lexical {
+    force_lexical: Option<&'a str>,
+    force_dense: Option<&'a str>,
+}
+
+struct DispatchOutcome {
+    lexical: Result<Vec<ScoredRow>, RetrievalError>,
+    dense: Result<Vec<ScoredRow>, RetrievalError>,
+    lexical_millis: u64,
+    dense_millis: u64,
+}
+
+fn dispatch_sequential(request: DispatchRequest<'_>) -> DispatchOutcome {
+    let lexical_pair = if request.run_lexical {
         let started = Instant::now();
         let result = (|| {
-            maybe_force_lexical_error(force_lexical)?;
-            maybe_delay(delay);
-            lexical.search(text, config.lexical_depth)
+            maybe_force_lexical_error(request.hooks.force_lexical)?;
+            maybe_delay(request.hooks.delay);
+            request
+                .lexical
+                .search(request.text, request.config.lexical_depth)
         })();
-        let millis = started.elapsed().as_millis() as u64;
-        (result, millis)
+        (result, started.elapsed().as_millis() as u64)
     } else {
         (Ok(Vec::new()), 0)
     };
 
     let dense_started = Instant::now();
     let dense_result = (|| {
-        maybe_force_dense_error(force_dense)?;
-        maybe_delay(delay);
-        dense.search(query_vec, model_id, config.dense_depth)
+        maybe_force_dense_error(request.hooks.force_dense)?;
+        maybe_delay(request.hooks.delay);
+        request.dense.search(
+            request.query_vec,
+            request.model_id,
+            request.config.dense_depth,
+        )
     })();
-    let dense_millis = dense_started.elapsed().as_millis() as u64;
-
-    (
-        lexical_result.0,
-        dense_result,
-        lexical_result.1,
-        dense_millis,
-    )
+    DispatchOutcome {
+        lexical: lexical_pair.0,
+        dense: dense_result,
+        lexical_millis: lexical_pair.1,
+        dense_millis: dense_started.elapsed().as_millis() as u64,
+    }
 }
 
-fn dispatch_concurrent(
-    lexical: &LexicalIndex,
-    dense: &DenseIndex,
-    text: &str,
-    query_vec: &[f16],
-    model_id: &str,
-    config: &FusionConfig,
-    delay: Option<std::time::Duration>,
-    force_lexical: Option<&str>,
-    force_dense: Option<&str>,
-) -> (
-    Result<Vec<ScoredRow>, RetrievalError>,
-    Result<Vec<ScoredRow>, RetrievalError>,
-    u64,
-    u64,
-) {
-    let handle = lexical.search_handle();
-    let text_owned = text.to_owned();
-    let query_owned = query_vec.to_vec();
-    let model_owned = model_id.to_owned();
-    let lexical_depth = config.lexical_depth;
-    let dense_depth = config.dense_depth;
+fn dispatch_concurrent(request: DispatchRequest<'_>) -> DispatchOutcome {
+    let handle = request.lexical.search_handle();
+    let text_owned = request.text.to_owned();
+    let query_owned = request.query_vec.to_vec();
+    let model_owned = request.model_id.to_owned();
+    let lexical_depth = request.config.lexical_depth;
+    let dense_depth = request.config.dense_depth;
+    let delay = request.hooks.delay;
+    let force_lexical = request.hooks.force_lexical;
+    let force_dense = request.hooks.force_dense;
+    let dense = request.dense;
 
     let mut lexical_out = None;
     let mut dense_out = None;
@@ -377,12 +375,12 @@ fn dispatch_concurrent(
         dense_millis = den_ms;
     });
 
-    (
-        lexical_out.expect("lexical result"),
-        dense_out.expect("dense result"),
+    DispatchOutcome {
+        lexical: lexical_out.expect("lexical result"),
+        dense: dense_out.expect("dense result"),
         lexical_millis,
         dense_millis,
-    )
+    }
 }
 
 fn assemble(
@@ -401,7 +399,11 @@ fn assemble(
         let Some(record) = records.get(index).and_then(|r| r.as_ref()) else {
             continue;
         };
-        let body = bodies.get(index).and_then(|b| b.as_ref()).map(String::as_str).unwrap_or("");
+        let body = bodies
+            .get(index)
+            .and_then(|b| b.as_ref())
+            .map(String::as_str)
+            .unwrap_or("");
         results.push(SearchResult {
             file: record.file.clone(),
             symbol: record.symbol.clone(),
@@ -918,11 +920,7 @@ mod tests {
     fn results_never_carry_full_file_or_body_past_preview() {
         let dir = tempdir().unwrap();
         let embedder = MockEmbedder::new(DIMS);
-        let large_body = format!(
-            "{}\n{}",
-            "fn huge() {\n",
-            "x".repeat(PREVIEW_MAX_BYTES * 4)
-        );
+        let large_body = format!("{}\n{}", "fn huge() {\n", "x".repeat(PREVIEW_MAX_BYTES * 4));
         let whole_file = format!(
             "// file header\n{large_body}\nfn other() {{}}\n{}",
             "y".repeat(2000)
