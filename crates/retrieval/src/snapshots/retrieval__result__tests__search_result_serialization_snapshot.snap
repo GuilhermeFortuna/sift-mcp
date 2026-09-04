@@ -1,0 +1,35 @@
+---
+source: crates/retrieval/src/result.rs
+assertion_line: 112
+expression: json
+---
+[
+  {
+    "file": "src/timestamp.rs",
+    "symbol": "normalize_timestamp",
+    "signature": "fn normalize_timestamp(pts: i64, last: i64) -> i64",
+    "doc": "Clamp regressing decoder timestamps to monotonic order.",
+    "preview": "let mut t = pts;\nif t < last {\n    t = last + 1;",
+    "lines": [
+      82,
+      117
+    ],
+    "lexical_score": 0.44,
+    "dense_score": 0.81,
+    "fused_score": 0.032276
+  },
+  {
+    "file": "src/other.rs",
+    "symbol": "helper",
+    "signature": "fn helper()",
+    "doc": null,
+    "preview": "fn helper() {}",
+    "lines": [
+      1,
+      3
+    ],
+    "lexical_score": null,
+    "dense_score": 0.0,
+    "fused_score": 0.016393
+  }
+]

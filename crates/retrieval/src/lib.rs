@@ -10,4 +10,4 @@ pub mod tokenize;
 pub use error::RetrievalError;
 pub use fusion::{Contribution, FusedRow, FusionConfig, fuse};
 pub use lexical::{LexicalDoc, LexicalIndex, ScoredRow};
-pub use result::{PREVIEW_MAX_BYTES, preview_from_body};
+pub use result::{PREVIEW_MAX_BYTES, SearchResult, preview_from_body};

@@ -11,6 +11,8 @@ cuda = ["inference/cuda"]
 [dependencies]
 half = { workspace = true }
 inference = { path = "../inference" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 storage = { path = "../storage" }
 tantivy = { workspace = true }
 thiserror = { workspace = true }
