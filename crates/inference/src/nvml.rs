@@ -22,12 +22,9 @@ struct NvmlMemory {
 
 type NvmlInit = unsafe extern "C" fn() -> NvmlReturn;
 type NvmlShutdown = unsafe extern "C" fn() -> NvmlReturn;
-type NvmlDeviceGetHandleByIndex =
-    unsafe extern "C" fn(c_uint, *mut *mut NvmlDevice) -> NvmlReturn;
-type NvmlDeviceGetUUID =
-    unsafe extern "C" fn(*mut NvmlDevice, *mut c_char, c_uint) -> NvmlReturn;
-type NvmlDeviceGetMemoryInfo =
-    unsafe extern "C" fn(*mut NvmlDevice, *mut NvmlMemory) -> NvmlReturn;
+type NvmlDeviceGetHandleByIndex = unsafe extern "C" fn(c_uint, *mut *mut NvmlDevice) -> NvmlReturn;
+type NvmlDeviceGetUUID = unsafe extern "C" fn(*mut NvmlDevice, *mut c_char, c_uint) -> NvmlReturn;
+type NvmlDeviceGetMemoryInfo = unsafe extern "C" fn(*mut NvmlDevice, *mut NvmlMemory) -> NvmlReturn;
 
 unsafe extern "C" {
     fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
