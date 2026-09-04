@@ -1,0 +1,31 @@
+version = 1
+
+[search_code]
+summary = "Semantic and lexical search over an indexed repository. Returns triage-sized previews with file, symbol, signature, and scores — never a whole file."
+prefer_over = "Prefer this over grep or glob when you need the most relevant code for a natural-language question, or when an exact identifier search should be fused with semantic neighbours."
+examples = [
+  "where are decoder timestamps normalized to be monotonic?",
+  "error: failed to open index lock",
+]
+
+[find_similar_code]
+summary = "Find code similar to a pasted snippet by embedding the snippet as a document and ranking nearest chunks. There is no keyword baseline for this tool."
+prefer_over = "Prefer this over grep when you have a concrete code sample (from a PR, stack trace, or another project) and need analogous implementations, not an exact string match."
+examples = [
+  "fn normalize_timestamp(pts: i64, last: i64) -> i64 {\n    if pts < last { last + 1 } else { pts }\n}",
+]
+
+[get_symbol]
+summary = "Return the full body of one symbol identified by repository-relative file path and the qualified name emitted by indexing (for example Type::method)."
+prefer_over = "Prefer this over opening a whole file when search already named the symbol and you need its complete implementation, not a preview."
+examples = [
+  "file=src/timestamp.rs symbol=normalize_timestamp",
+  "file=src/decoder.rs symbol=Decoder::flush",
+]
+
+[index_repository]
+summary = "Index or incrementally update a repository so search tools see current code. Streams progress while work runs."
+prefer_over = "Prefer this over assuming the index is fresh after large local edits, a branch switch, or the first time you point Sift at a repository. Default is incremental; set full=true only to force a rebuild."
+examples = [
+  "path=/home/me/proj full=false",
+]
