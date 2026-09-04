@@ -42,6 +42,18 @@ impl EventRing {
         self.next_sequence
     }
 
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    pub fn oldest_sequence(&self) -> Option<u64> {
+        self.events.front().map(|e| e.cursor.sequence)
+    }
+
     /// Return events after `after`, signalling gaps when the cursor is stale.
     pub fn page(
         &self,
@@ -231,5 +243,48 @@ mod tests {
         assert!(!encoded.contains("secret_path.rs"));
         assert_eq!(obs.events[0].operation, "Search");
         assert_eq!(obs.events[0].request_id, 2);
+    }
+
+    #[test]
+    fn ring_retains_capacity_and_signals_eviction_gap() {
+        let mut ring = EventRing::default();
+        for i in 0..4100u64 {
+            ring.push(event("a", 0, 1, i));
+        }
+        assert_eq!(ring.len(), EVENT_RING_CAPACITY);
+        // Oldest retained sequence should be 4100 - 4096 = 4.
+        assert_eq!(ring.oldest_sequence(), Some(4));
+        let (page, next, gap, more) = ring.page(
+            "a",
+            Some(&EventCursor {
+                instance_id: "a".into(),
+                sequence: 0, // evicted
+            }),
+        );
+        assert!(gap);
+        assert!(more || page.len() <= OBSERVE_PAGE_SIZE);
+        assert!(page.len() <= OBSERVE_PAGE_SIZE);
+        assert_eq!(page.first().map(|e| e.cursor.sequence), Some(4));
+        assert_eq!(next.sequence, page.last().unwrap().cursor.sequence);
+    }
+
+    #[test]
+    fn observe_page_stays_under_frame_limit() {
+        use crate::codec::encode;
+        use crate::protocol::{Envelope, MAX_REQUEST_BYTES, Response};
+        let mut ring = EventRing::default();
+        for i in 0..500u64 {
+            let mut ev = event("a", 0, i, i);
+            ev.operation = "Search".into();
+            ring.push(ev);
+        }
+        let obs = build_observation(status("a"), &ring, None);
+        assert!(obs.events.len() <= OBSERVE_PAGE_SIZE);
+        let bytes = encode(&Envelope {
+            request_id: 1,
+            payload: Response::Observation(obs),
+        })
+        .unwrap();
+        assert!(bytes.len() <= MAX_REQUEST_BYTES + 4);
     }
 }

@@ -971,6 +971,43 @@ async fn observer_can_connect_when_store_is_stale() {
 }
 
 #[tokio::test]
+async fn restart_changes_instance_id() {
+    let h = Harness::new();
+    let daemon = h.start().await;
+    let id1 = daemon.state.instance_id.clone();
+    let socket = h.socket.clone();
+    let serve = tokio::spawn(async move { daemon.serve().await });
+    wait_ready(&socket).await;
+    let mut obs = DaemonClient::connect_observer(&socket).await.unwrap();
+    let first = obs.observe(None).await.unwrap();
+    assert_eq!(first.status.instance_id, id1);
+    drop(obs);
+    let mut worker = DaemonClient::connect(&socket).await.unwrap();
+    let _ = worker.request(Request::Shutdown).await;
+    let _ = serve.await;
+
+    let daemon = h.start().await;
+    let id2 = daemon.state.instance_id.clone();
+    assert_ne!(id1, id2);
+    let socket = h.socket.clone();
+    tokio::spawn(async move {
+        let _ = daemon.serve().await;
+    });
+    wait_ready(&socket).await;
+    let mut obs = DaemonClient::connect_observer(&socket).await.unwrap();
+    let second = obs.observe(None).await.unwrap();
+    assert_eq!(second.status.instance_id, id2);
+    let gap = obs
+        .observe(Some(daemon::EventCursor {
+            instance_id: id1,
+            sequence: 0,
+        }))
+        .await
+        .unwrap();
+    assert!(gap.gap);
+}
+
+#[tokio::test]
 async fn incomplete_handshake_times_out_without_blocking_idle() {
     let h = Harness::new();
     let mut config = h.config();
