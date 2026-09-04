@@ -38,6 +38,8 @@ pub struct SiftMcpConfig {
     pub connect_deadline: Duration,
     /// When false, never spawn; only connect to an existing socket.
     pub allow_spawn: bool,
+    /// When set, connect here instead of deriving from store_dir + XDG_RUNTIME_DIR.
+    pub socket_path: Option<PathBuf>,
 }
 
 pub struct SiftMcpServer {
@@ -65,6 +67,7 @@ impl SiftMcpServer {
             daemon_binary: PathBuf::from("sift-daemon"),
             connect_deadline: Duration::from_secs(60),
             allow_spawn: true,
+            socket_path: None,
         })
     }
 
@@ -104,7 +107,10 @@ impl SiftMcpServer {
             )
             .await?
         } else {
-            let socket = daemon::paths::socket_path_for_store(&self.config.store_dir)?;
+            let socket = match &self.config.socket_path {
+                Some(p) => p.clone(),
+                None => daemon::paths::socket_path_for_store(&self.config.store_dir)?,
+            };
             let deadline = std::time::Instant::now() + self.config.connect_deadline;
             loop {
                 match DaemonClient::connect(&socket).await {
@@ -152,7 +158,7 @@ fn to_tool_error(err: DaemonError) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(format_daemon_error(&err))])
 }
 
-fn format_daemon_error(err: &DaemonError) -> String {
+pub(crate) fn format_daemon_error(err: &DaemonError) -> String {
     match err {
         DaemonError::Starting => "Daemon is still starting (loading models). Retry shortly.".into(),
         DaemonError::IndexInProgress => {
@@ -413,4 +419,53 @@ impl ServerHandler for SiftMcpServer {
 /// Expose for tests / scripts that need the store path helper.
 pub fn socket_path_for_store(store_dir: &Path) -> Result<PathBuf, DaemonError> {
     daemon::paths::socket_path_for_store(store_dir)
+}
+
+#[cfg(test)]
+mod error_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn symbol_not_found_names_file_and_symbol() {
+        let msg = format_daemon_error(&DaemonError::SymbolNotFound {
+            file: "src/a.rs".into(),
+            symbol: "missing".into(),
+        });
+        assert!(msg.contains("src/a.rs"));
+        assert!(msg.contains("missing"));
+        assert!(msg.contains("not found") || msg.contains("Symbol not found"));
+    }
+
+    #[test]
+    fn symbol_ambiguous_lists_candidates() {
+        let msg = format_daemon_error(&DaemonError::SymbolAmbiguous {
+            file: "src/a.rs".into(),
+            symbol: "twin".into(),
+            candidates: vec![
+                "src/a.rs:fn twin()".into(),
+                "src/a.rs:fn twin(x: i32)".into(),
+            ],
+        });
+        assert!(msg.contains("ambiguous") || msg.contains("Ambiguous"));
+        assert!(msg.contains("fn twin()"));
+        assert!(msg.contains("fn twin(x: i32)"));
+    }
+
+    #[test]
+    fn gpu_index_stale_messages_are_actionable() {
+        let gpu = format_daemon_error(&DaemonError::GpuUnavailable {
+            detail: "no device".into(),
+        });
+        assert!(gpu.contains("GPU"));
+        assert!(gpu.contains("no device"));
+
+        let busy = format_daemon_error(&DaemonError::IndexInProgress);
+        assert!(busy.contains("retry") || busy.contains("Retry"));
+
+        let stale = format_daemon_error(&DaemonError::StoreStale {
+            reason: "replaced".into(),
+        });
+        assert!(stale.contains("stale") || stale.contains("Stale"));
+        assert!(stale.contains("index_repository") || stale.contains("re"));
+    }
 }

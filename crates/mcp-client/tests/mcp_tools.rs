@@ -100,6 +100,7 @@ impl Harness {
             daemon_binary: PathBuf::from("sift-daemon"),
             connect_deadline: Duration::from_secs(10),
             allow_spawn: false,
+            socket_path: Some(self.socket.clone()),
         })
     }
 }
@@ -199,6 +200,198 @@ fn tool_text(result: &rmcp::model::CallToolResult) -> String {
         ContentBlock::Text(t) => t.text.clone(),
         other => panic!("expected text, got {other:?}"),
     }
+}
+
+fn tool_error_text(result: &rmcp::model::CallToolResult) -> String {
+    use rmcp::model::ContentBlock;
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    match &result.content[0] {
+        ContentBlock::Text(t) => t.text.clone(),
+        other => panic!("expected text, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn search_code_preview_never_exceeds_bound_on_large_files() {
+    let h = Harness::new();
+    // One symbol whose body exceeds the preview bound (single chunk).
+    let filler = "x".repeat(retrieval::PREVIEW_MAX_BYTES + 200);
+    let big = format!("pub fn huge() {{\n    let s = \"{filler}\";\n}}\n");
+    assert!(big.len() > retrieval::PREVIEW_MAX_BYTES);
+    write_rs(h.repo.path(), "src/huge.rs", &big);
+    git_commit(h.repo.path(), "huge");
+    h.start_daemon().await;
+    let indexed = call_tool(
+        h.mcp_server(),
+        "index_repository",
+        json!({ "path": h.repo.path().to_string_lossy(), "full": false }),
+    )
+    .await;
+    let _ = tool_text(&indexed);
+
+    let search = call_tool(
+        h.mcp_server(),
+        "search_code",
+        json!({ "query": "huge", "top_k": 5 }),
+    )
+    .await;
+    let text = tool_text(&search);
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let results = value["results"].as_array().unwrap();
+    assert!(!results.is_empty(), "{text}");
+    for r in results {
+        let preview = r["preview"].as_str().unwrap();
+        assert!(
+            preview.len() <= retrieval::PREVIEW_MAX_BYTES,
+            "preview len {} exceeds {}",
+            preview.len(),
+            retrieval::PREVIEW_MAX_BYTES
+        );
+        assert!(
+            preview.len() < big.len(),
+            "search must not return whole file"
+        );
+    }
+
+    let sym = call_tool(
+        h.mcp_server(),
+        "get_symbol",
+        json!({ "file": "src/huge.rs", "symbol": "huge" }),
+    )
+    .await;
+    let sym_text = tool_text(&sym);
+    let sym_val: serde_json::Value = serde_json::from_str(&sym_text).unwrap();
+    let body = sym_val["body"].as_str().unwrap();
+    assert!(body.len() > retrieval::PREVIEW_MAX_BYTES);
+}
+
+#[tokio::test]
+async fn get_symbol_absent_is_actionable() {
+    let h = Harness::new();
+    h.start_daemon().await;
+
+    let absent = call_tool(
+        h.mcp_server(),
+        "get_symbol",
+        json!({ "file": "src/lib.rs", "symbol": "no_such_symbol" }),
+    )
+    .await;
+    let absent_msg = tool_error_text(&absent);
+    assert!(absent_msg.contains("not found") || absent_msg.contains("Symbol not found"));
+    assert!(absent_msg.contains("src/lib.rs"));
+    assert!(absent_msg.contains("no_such_symbol"));
+}
+
+#[tokio::test]
+async fn cold_start_spawns_daemon_and_searches() {
+    let h = Harness::new();
+    // Build path to sift-daemon from CARGO_BIN_EXE if available, else target/debug.
+    let bin = std::env::var_os("CARGO_BIN_EXE_sift-daemon")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/sift-daemon")
+        });
+    if !bin.exists() {
+        // Compile the binary for this test when missing from the default target dir.
+        let status = std::process::Command::new("cargo")
+            .args(["build", "-p", "daemon", "--bin", "sift-daemon"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let bin = if bin.exists() {
+        bin
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/sift-daemon")
+    };
+    assert!(bin.exists(), "sift-daemon missing at {}", bin.display());
+
+    let server = SiftMcpServer::with_config(SiftMcpConfig {
+        store_dir: h.store_dir.path().to_path_buf(),
+        repo_dir: h.repo.path().to_path_buf(),
+        model_dir: PathBuf::from("."),
+        daemon_binary: bin,
+        connect_deadline: Duration::from_secs(30),
+        allow_spawn: true,
+        socket_path: None,
+    });
+    let result = call_tool(
+        server,
+        "search_code",
+        json!({ "query": "alpha", "top_k": 5 }),
+    )
+    .await;
+    let text = tool_text(&result);
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        value["results"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn advertised_tools_are_exactly_four_without_resources_or_prompts() {
+    let h = Harness::new();
+    h.start_daemon().await;
+    let server = h.mcp_server();
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        let _ = server
+            .serve(server_transport)
+            .await
+            .unwrap()
+            .waiting()
+            .await;
+    });
+    let client = TestClient.serve(client_transport).await.unwrap();
+    let tools = client.list_all_tools().await.unwrap();
+    let mut sorted: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        vec![
+            "find_similar_code".to_string(),
+            "get_symbol".to_string(),
+            "index_repository".to_string(),
+            "search_code".to_string(),
+        ]
+    );
+    for t in &tools {
+        let desc = t.description.as_ref().map(|d| d.as_ref()).unwrap_or("");
+        assert!(desc.contains("Prefer"), "missing prefer_over in {}", t.name);
+        assert!(desc.contains("Examples:"), "missing examples in {}", t.name);
+    }
+    let info = client
+        .peer_info()
+        .expect("server peer info after handshake");
+    assert!(info.capabilities.tools.is_some());
+    assert!(info.capabilities.resources.is_none());
+    assert!(info.capabilities.prompts.is_none());
+    let _ = client.cancel().await;
+}
+
+#[tokio::test]
+async fn unreachable_daemon_names_cause() {
+    let h = Harness::new();
+    // Do not start daemon; spawn disabled.
+    let result = call_tool(
+        h.mcp_server(),
+        "search_code",
+        json!({ "query": "alpha", "top_k": 5 }),
+    )
+    .await;
+    let msg = tool_error_text(&result);
+    assert!(
+        msg.contains("unreachable")
+            || msg.contains("spawning is disabled")
+            || msg.contains("Daemon error")
+            || msg.contains("timed out")
+            || msg.contains("connect"),
+        "{msg}"
+    );
 }
 
 #[tokio::test]
