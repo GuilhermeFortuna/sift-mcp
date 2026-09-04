@@ -32,7 +32,7 @@ appears only in `tools/`.
 | [SIFT-011](specs/SIFT-011-mcp-tool-surface-spec.md) / [Plan](plans/SIFT-011-mcp-tool-surface-plan.md)       | 01    | `DONE`    | SIFT-010                     | The four Phase 1 MCP tools served by a thin stdio client that starts in milliseconds                             |
 | [SIFT-012](specs/SIFT-012-git-mined-eval-spec.md) / [Plan](plans/SIFT-012-git-mined-eval-plan.md)           | 01    | `READY`   | SIFT-006, SIFT-009           | Thousands of retrieval labels mined from a pinned third-party history, and a metrics report over them            |
 | [SIFT-013](specs/SIFT-013-phase-1-acceptance-spec.md) / [Plan](plans/SIFT-013-phase-1-acceptance-plan.md)   | 01    | `BLOCKED` | SIFT-011, SIFT-012           | A measured verdict on the Phase 1 exit criteria, and a locked baseline for Phase 2                               |
-| [SIFT-014](specs/SIFT-014-ci-resource-bounds-spec.md) / [Plan](plans/SIFT-014-ci-resource-bounds-plan.md)   | 01    | `READY`   | SIFT-001                     | Conservative validation defaults that keep large test artifacts from exhausting developer workstations          |
+| [SIFT-014](specs/SIFT-014-ci-resource-bounds-spec.md) / [Plan](plans/SIFT-014-ci-resource-bounds-plan.md)   | 01    | `DONE`    | SIFT-001                     | Conservative validation defaults that keep large test artifacts from exhausting developer workstations           |
 
 
 Batch 01 implements Phase 1 of the project direction: the retrieval foundation.
