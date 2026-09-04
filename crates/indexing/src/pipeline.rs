@@ -91,7 +91,7 @@ pub trait Progress {
     fn phase(&mut self, phase: Phase, done: u64, total: Option<u64>);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Phase {
     Walking,
     Parsing,

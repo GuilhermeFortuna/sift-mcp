@@ -1,6 +1,6 @@
 //! Search result records and preview truncation.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Preview ceiling in bytes. Roughly three-to-four lines of code — enough to
 /// recognize the chunk, short enough that ten results stay small.
@@ -8,7 +8,7 @@ pub const PREVIEW_MAX_BYTES: usize = 320;
 
 /// The serialized shape returned to the agent. Field names and order are the
 /// locked snapshot.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchResult {
     pub file: String,
     pub symbol: String,
