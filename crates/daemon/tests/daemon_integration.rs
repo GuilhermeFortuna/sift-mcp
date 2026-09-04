@@ -832,3 +832,160 @@ async fn request_emits_structured_log() {
         .unwrap();
     // log_request is invoked on every request path (see server.rs).
 }
+
+#[tokio::test]
+async fn observer_polling_does_not_extend_idle_timeout() {
+    let h = Harness::new();
+    let mut config = h.config();
+    config.idle_timeout = Duration::from_secs(1);
+    let daemon = Daemon::bind(config, Arc::clone(&h.embedder) as Arc<dyn Embedder>)
+        .await
+        .unwrap();
+    let socket = h.socket.clone();
+    let serve = tokio::spawn(async move { daemon.serve().await });
+    wait_ready(&socket).await;
+
+    let s = socket.clone();
+    let observer = tokio::spawn(async move {
+        let mut obs = DaemonClient::connect_observer(&s).await.unwrap();
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(3) {
+            let _ = obs.observe(None).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+
+    let finished = tokio::time::timeout(Duration::from_secs(2), serve).await;
+    assert!(
+        finished.is_ok(),
+        "daemon should idle-exit within 2s despite observer polls"
+    );
+    let _ = observer.await;
+}
+
+#[tokio::test]
+async fn observer_forbidden_operations_and_disconnect_do_not_extend_idle() {
+    let h = Harness::new();
+    let mut config = h.config();
+    config.idle_timeout = Duration::from_secs(1);
+    let daemon = Daemon::bind(config, Arc::clone(&h.embedder) as Arc<dyn Embedder>)
+        .await
+        .unwrap();
+    let socket = h.socket.clone();
+    let serve = tokio::spawn(async move { daemon.serve().await });
+    wait_ready(&socket).await;
+
+    let mut obs = DaemonClient::connect_observer(&socket).await.unwrap();
+    for req in [
+        Request::Search {
+            query: "alpha".into(),
+            top_k: 3,
+        },
+        Request::SearchSimilar {
+            code: "fn x() {}".into(),
+            top_k: 3,
+        },
+        Request::GetSymbol {
+            file: "src/lib.rs".into(),
+            symbol: "alpha".into(),
+        },
+        Request::Index {
+            mode: IndexMode::Update,
+            repo_dir: h.repo.path().to_path_buf(),
+        },
+        Request::Shutdown,
+    ] {
+        let err = obs.request(req).await;
+        assert!(
+            matches!(err, Err(DaemonError::ObserverForbidden { .. })),
+            "{err:?}"
+        );
+    }
+    drop(obs);
+
+    let finished = tokio::time::timeout(Duration::from_secs(2), serve).await;
+    assert!(
+        finished.is_ok(),
+        "denied ops and observer disconnect must not extend idle"
+    );
+}
+
+#[tokio::test]
+async fn observer_can_connect_during_slow_startup() {
+    let h = Harness::new();
+    let daemon = h.start().await;
+    *daemon.state.load_delay.lock() = Some(Duration::from_millis(400));
+    let socket = h.socket.clone();
+    tokio::spawn(async move {
+        let _ = daemon.serve().await;
+    });
+
+    // Connect before ready; observers must be allowed through.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut connected = false;
+    while Instant::now() < deadline {
+        if let Ok(mut obs) = DaemonClient::connect_observer(&socket).await {
+            let status = obs.request(Request::Status).await.unwrap();
+            assert!(matches!(status, Response::Status(_)));
+            let obs_resp = obs.observe(None).await.unwrap();
+            assert!(matches!(
+                obs_resp.status.lifecycle,
+                daemon::Lifecycle::Starting | daemon::Lifecycle::Ready
+            ));
+            connected = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(connected, "observer should connect during startup");
+}
+
+#[tokio::test]
+async fn observer_can_connect_when_store_is_stale() {
+    let h = Harness::new();
+    let daemon = h.start().await;
+    let state = Arc::clone(&daemon.state);
+    let socket = h.socket.clone();
+    tokio::spawn(async move {
+        let _ = daemon.serve().await;
+    });
+    wait_ready(&socket).await;
+    *state.serving.write().unwrap() =
+        daemon::resident::ServingState::Stale("ui-001 fixture".into());
+
+    let worker_err = DaemonClient::connect(&socket).await;
+    assert!(
+        matches!(worker_err, Err(DaemonError::StoreStale { .. })),
+        "expected StoreStale for worker, got ok={}",
+        worker_err.is_ok()
+    );
+
+    let mut obs = DaemonClient::connect_observer(&socket).await.unwrap();
+    let status = obs.request(Request::Status).await.unwrap();
+    match status {
+        Response::Status(s) => assert_eq!(s.lifecycle, daemon::Lifecycle::Stale),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn incomplete_handshake_times_out_without_blocking_idle() {
+    let h = Harness::new();
+    let mut config = h.config();
+    config.idle_timeout = Duration::from_secs(1);
+    let daemon = Daemon::bind(config, Arc::clone(&h.embedder) as Arc<dyn Embedder>)
+        .await
+        .unwrap();
+    let socket = h.socket.clone();
+    let serve = tokio::spawn(async move { daemon.serve().await });
+    wait_ready(&socket).await;
+
+    // Open a raw socket and never send Hello.
+    let _hanging = UnixStream::connect(&socket).await.unwrap();
+
+    let finished = tokio::time::timeout(Duration::from_secs(2), serve).await;
+    assert!(
+        finished.is_ok(),
+        "provisional incomplete handshake must not block idle exit"
+    );
+}

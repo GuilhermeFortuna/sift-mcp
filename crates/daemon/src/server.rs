@@ -20,11 +20,14 @@ use crate::paths::{
     assert_socket_permissions, lock_path_for_store, open_lock_file, prepare_socket_path,
     tighten_socket_permissions,
 };
-use crate::protocol::{DaemonError, Envelope, IndexMode, Request, Response};
+use crate::protocol::{ClientRole, DaemonError, Envelope, IndexMode, Request, Response};
 use crate::resident::{
     ProgressForwarder, Resident, ServingState, SharedState, index_report_response,
     rebuild_resident, run_index, split_for_index,
 };
+
+/// How long a connection may sit before completing Hello.
+const PROVISIONAL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct DaemonConfig {
     pub store_dir: PathBuf,
@@ -187,14 +190,20 @@ impl Daemon {
                                 drop(stream);
                                 continue;
                             }
-                            *state.connected_clients.lock() += 1;
+                            // Provisional: do not count as a worker until Hello classifies.
                             let st = Arc::clone(&state);
                             jobs.spawn(async move {
-                                if let Err(e) = handle_connection(stream, st.clone()).await {
-                                    warn!(error = ?e, "connection error");
+                                let role = match handle_connection(stream, st.clone()).await {
+                                    Ok(role) => role,
+                                    Err(e) => {
+                                        warn!(error = ?e, "connection error");
+                                        None
+                                    }
+                                };
+                                if role == Some(ClientRole::Worker) {
+                                    *st.connected_clients.lock() -= 1;
+                                    st.touch();
                                 }
-                                *st.connected_clients.lock() -= 1;
-                                st.touch();
                             });
                         }
                         Err(e) => {
@@ -206,6 +215,7 @@ impl Daemon {
         }
 
         *state.shutting_down.lock() = true;
+        state.connection_shutdown.notify_waiters();
         while jobs.join_next().await.is_some() {}
         *state.serving.write().unwrap() = ServingState::Starting;
         let _ = std::fs::remove_file(&socket_path);
@@ -213,14 +223,114 @@ impl Daemon {
     }
 }
 
-async fn handle_connection(stream: UnixStream, state: Arc<SharedState>) -> Result<(), DaemonError> {
+async fn handle_connection(
+    stream: UnixStream,
+    state: Arc<SharedState>,
+) -> Result<Option<ClientRole>, DaemonError> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = tokio::io::BufReader::new(reader);
-    let mut hello_done = false;
+
+    // Provisional handshake deadline: incomplete Hello must not pin residency.
+    let hello_env = match read_envelope_until(&mut reader, &state, PROVISIONAL_HANDSHAKE_TIMEOUT)
+        .await
+    {
+        Ok(Some(env)) => env,
+        Ok(None) => return Ok(None),
+        Err(DaemonError::Malformed { detail }) if detail.contains("truncated") => {
+            return Ok(None);
+        }
+        Err(e) => {
+            let _ = write_response(&mut writer, 0, Response::Error(e.clone())).await;
+            return Ok(None);
+        }
+    };
+
+    let request_id = hello_env.request_id;
+    let req_type = request_type_name(&hello_env.payload);
+
+    let is_observer_hello = matches!(
+        &hello_env.payload,
+        Request::Hello { client, .. } if ClientRole::from_hello_client(client) == ClientRole::Observer
+    );
+
+    // Workers are rejected during Starting/Stale; observers may diagnose those states.
+    if !is_observer_hello {
+        let starting = matches!(*state.serving.read().unwrap(), ServingState::Starting);
+        let stale_reason = match &*state.serving.read().unwrap() {
+            ServingState::Stale(r) => Some(r.clone()),
+            _ => None,
+        };
+        if let Some(reason) = stale_reason {
+            let resp = Response::Error(DaemonError::StoreStale { reason });
+            write_response(&mut writer, request_id, resp).await?;
+            return Ok(None);
+        }
+        if starting {
+            match &hello_env.payload {
+                Request::Hello { .. } => {}
+                Request::Status => {
+                    let resp = Response::Status(state.status());
+                    log_request(request_id, req_type, "ok", None);
+                    write_response(&mut writer, request_id, resp).await?;
+                    // Status without Hello does not classify; stay provisional and exit.
+                    return Ok(None);
+                }
+                _ => {
+                    let resp = Response::Error(DaemonError::Starting);
+                    log_request(request_id, req_type, "starting", None);
+                    write_response(&mut writer, request_id, resp).await?;
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    let (model_id, chunks) = {
+        let guard = state.serving.read().unwrap();
+        match &*guard {
+            ServingState::Ready(r) => {
+                let parts = r.parts.lock().unwrap();
+                let live = parts.store.stats().map(|s| s.live).unwrap_or(0);
+                (r.search.model_id.clone(), live)
+            }
+            ServingState::Indexing(f) => (f.model_id.clone(), f.chunks_live),
+            ServingState::Starting => (String::new(), 0),
+            ServingState::Stale(_) => (String::new(), 0),
+        }
+    };
+
+    let hello_ok = match handle_hello(&hello_env, &model_id, chunks) {
+        Ok((ok, resp)) => {
+            log_request(request_id, "Hello", "ok", None);
+            write_response(&mut writer, request_id, *resp).await?;
+            ok
+        }
+        Err(resp) => {
+            log_request(request_id, req_type, "error", None);
+            write_response(&mut writer, request_id, *resp).await?;
+            return Ok(None);
+        }
+    };
+
+    let role = hello_ok.role;
+    if role == ClientRole::Worker {
+        *state.connected_clients.lock() += 1;
+        state.touch();
+    }
 
     loop {
-        let env: Envelope<Request> = match read_envelope(&mut reader).await {
-            Ok(e) => e,
+        if *state.shutting_down.lock() {
+            break;
+        }
+        let env: Envelope<Request> = match read_envelope_until(
+            &mut reader,
+            &state,
+            Duration::from_secs(3600),
+        )
+        .await
+        {
+            Ok(Some(e)) => e,
+            Ok(None) => break,
             Err(DaemonError::Malformed { detail }) if detail.contains("truncated") => {
                 break;
             }
@@ -236,66 +346,25 @@ async fn handle_connection(stream: UnixStream, state: Arc<SharedState>) -> Resul
                 break;
             }
         };
-        state.touch();
+
+        if role == ClientRole::Worker {
+            state.touch();
+        }
+
         let request_id = env.request_id;
         let req_type = request_type_name(&env.payload);
 
-        if !hello_done {
-            let starting = matches!(*state.serving.read().unwrap(), ServingState::Starting);
-            let stale_reason = match &*state.serving.read().unwrap() {
-                ServingState::Stale(r) => Some(r.clone()),
-                _ => None,
-            };
-            if let Some(reason) = stale_reason {
-                let resp = Response::Error(DaemonError::StoreStale { reason });
-                write_response(&mut writer, request_id, resp).await?;
-                continue;
-            }
-            if starting {
-                match &env.payload {
-                    Request::Hello { .. } => {}
-                    Request::Status => {
-                        let resp = Response::Status(state.status());
-                        log_request(request_id, req_type, "ok", None);
-                        write_response(&mut writer, request_id, resp).await?;
-                        continue;
-                    }
-                    _ => {
-                        let resp = Response::Error(DaemonError::Starting);
-                        log_request(request_id, req_type, "starting", None);
-                        write_response(&mut writer, request_id, resp).await?;
-                        continue;
-                    }
+        if role == ClientRole::Observer {
+            match &env.payload {
+                Request::Status | Request::Observe { .. } => {}
+                other => {
+                    let operation = request_type_name(other).to_owned();
+                    let err = DaemonError::ObserverForbidden { operation };
+                    log_request(request_id, req_type, "forbidden", None);
+                    write_response(&mut writer, request_id, Response::Error(err)).await?;
+                    continue;
                 }
             }
-
-            let (model_id, chunks) = {
-                let guard = state.serving.read().unwrap();
-                match &*guard {
-                    ServingState::Ready(r) => {
-                        let parts = r.parts.lock().unwrap();
-                        let live = parts.store.stats().map(|s| s.live).unwrap_or(0);
-                        (r.search.model_id.clone(), live)
-                    }
-                    ServingState::Indexing(f) => (f.model_id.clone(), f.chunks_live),
-                    ServingState::Starting => (String::new(), 0),
-                    ServingState::Stale(_) => (String::new(), 0),
-                }
-            };
-
-            match handle_hello(&env, &model_id, chunks) {
-                Ok((_ok, resp)) => {
-                    hello_done = true;
-                    log_request(request_id, "Hello", "ok", None);
-                    write_response(&mut writer, request_id, *resp).await?;
-                }
-                Err(resp) => {
-                    log_request(request_id, req_type, "error", None);
-                    write_response(&mut writer, request_id, *resp).await?;
-                    break;
-                }
-            }
-            continue;
         }
 
         let outcome = dispatch_request(&env.payload, &state, &mut writer, request_id).await;
@@ -312,7 +381,23 @@ async fn handle_connection(stream: UnixStream, state: Arc<SharedState>) -> Resul
             break;
         }
     }
-    Ok(())
+    Ok(Some(role))
+}
+
+/// Read one envelope, aborting early on connection shutdown or timeout.
+async fn read_envelope_until(
+    reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    state: &SharedState,
+    timeout: Duration,
+) -> Result<Option<Envelope<Request>>, DaemonError> {
+    tokio::select! {
+        biased;
+        _ = state.connection_shutdown.notified() => Ok(None),
+        _ = tokio::time::sleep(timeout) => Err(DaemonError::Malformed {
+            detail: "handshake or read timeout".into(),
+        }),
+        result = read_envelope(reader) => result.map(Some),
+    }
 }
 
 async fn dispatch_request(
