@@ -16,7 +16,10 @@ use retrieval::result::preview_from_body;
 use retrieval::{SearchDiagnostics, SearchResponse, SearchResult, Searcher, StageTimings};
 use storage::{ChunkRecord, ChunkStore, Integrity, RowId, SCHEMA_VERSION};
 
-use crate::protocol::{DaemonError, DaemonStatus, IndexReportWire, Response};
+use crate::protocol::{
+    DaemonError, DaemonStatus, IndexReportWire, LastIndexCompletion, Lifecycle, ResourceSnapshot,
+    Response,
+};
 
 /// Identity used to detect store delete/replace under a running daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +145,9 @@ pub struct SharedState {
     pub index_phase_delay: ParkingMutex<Option<Duration>>,
     pub shutdown: tokio::sync::Notify,
     pub shutting_down: ParkingMutex<bool>,
+    pub instance_id: String,
+    pub current_progress: ParkingMutex<Option<crate::protocol::IndexProgressSnapshot>>,
+    pub last_index: ParkingMutex<Option<LastIndexCompletion>>,
 }
 
 impl SharedState {
@@ -165,6 +171,9 @@ impl SharedState {
             index_phase_delay: ParkingMutex::new(None),
             shutdown: tokio::sync::Notify::new(),
             shutting_down: ParkingMutex::new(false),
+            instance_id: new_instance_id(),
+            current_progress: ParkingMutex::new(None),
+            last_index: ParkingMutex::new(None),
         })
     }
 
@@ -172,20 +181,46 @@ impl SharedState {
         *self.last_request_at.lock() = Instant::now();
     }
 
+    pub fn observed_at_unix_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
     pub fn status(&self) -> DaemonStatus {
         let uptime = self.started_at.elapsed().as_secs();
         let idle = self.last_request_at.lock().elapsed().as_secs();
+        let observed_at_unix_ms = Self::observed_at_unix_ms();
+        let resources = ResourceSnapshot::unavailable(observed_at_unix_ms);
+        let current_progress = self.current_progress.lock().clone();
+        let last_index = self.last_index.lock().clone();
+        let shutting_down = *self.shutting_down.lock();
         let guard = self.serving.read().unwrap();
+        let lifecycle = if shutting_down {
+            Lifecycle::ShuttingDown
+        } else {
+            match &*guard {
+                ServingState::Starting => Lifecycle::Starting,
+                ServingState::Ready(_) => Lifecycle::Ready,
+                ServingState::Indexing(_) => Lifecycle::Indexing,
+                ServingState::Stale(_) => Lifecycle::Stale,
+            }
+        };
         match &*guard {
             ServingState::Starting => DaemonStatus {
-                model_id: String::new(),
-                chunks_live: 0,
-                chunks_dead: 0,
+                lifecycle,
+                instance_id: self.instance_id.clone(),
+                observed_at_unix_ms,
+                model_id: None,
+                chunks_live: None,
+                chunks_dead: None,
                 indexed_commit: None,
-                indexing: false,
-                resident_gpu_bytes: 0,
                 idle_seconds: idle,
                 uptime_seconds: uptime,
+                current_progress,
+                last_index,
+                resources,
             },
             ServingState::Ready(r) => {
                 let parts = r.parts.lock().unwrap();
@@ -195,38 +230,59 @@ impl SharedState {
                     dead_fraction: 0.0,
                 });
                 DaemonStatus {
-                    model_id: r.search.model_id.clone(),
-                    chunks_live: stats.live,
-                    chunks_dead: stats.dead,
+                    lifecycle,
+                    instance_id: self.instance_id.clone(),
+                    observed_at_unix_ms,
+                    model_id: Some(r.search.model_id.clone()),
+                    chunks_live: Some(stats.live),
+                    chunks_dead: Some(stats.dead),
                     indexed_commit: parts.store.indexed_commit().ok().flatten(),
-                    indexing: false,
-                    resident_gpu_bytes: 0,
                     idle_seconds: idle,
                     uptime_seconds: uptime,
+                    current_progress,
+                    last_index,
+                    resources,
                 }
             }
             ServingState::Indexing(f) => DaemonStatus {
-                model_id: f.model_id.clone(),
-                chunks_live: f.chunks_live,
-                chunks_dead: f.chunks_dead,
+                lifecycle,
+                instance_id: self.instance_id.clone(),
+                observed_at_unix_ms,
+                model_id: Some(f.model_id.clone()),
+                chunks_live: Some(f.chunks_live),
+                chunks_dead: Some(f.chunks_dead),
                 indexed_commit: f.indexed_commit.clone(),
-                indexing: true,
-                resident_gpu_bytes: 0,
                 idle_seconds: idle,
                 uptime_seconds: uptime,
+                current_progress,
+                last_index,
+                resources,
             },
             ServingState::Stale(_) => DaemonStatus {
-                model_id: String::new(),
-                chunks_live: 0,
-                chunks_dead: 0,
+                lifecycle,
+                instance_id: self.instance_id.clone(),
+                observed_at_unix_ms,
+                model_id: None,
+                chunks_live: None,
+                chunks_dead: None,
                 indexed_commit: None,
-                indexing: false,
-                resident_gpu_bytes: 0,
                 idle_seconds: idle,
                 uptime_seconds: uptime,
+                current_progress,
+                last_index,
+                resources,
             },
         }
     }
+}
+
+fn new_instance_id() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    Instant::now().hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 impl Resident {

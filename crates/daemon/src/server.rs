@@ -598,6 +598,25 @@ async fn dispatch_request(
                 Err(e) => Err(e),
             }
         }
+        Request::Observe { after } => {
+            let status = state.status();
+            let next_cursor = crate::protocol::EventCursor {
+                instance_id: state.instance_id.clone(),
+                sequence: after.as_ref().map(|c| c.sequence).unwrap_or(0),
+            };
+            let gap = after
+                .as_ref()
+                .is_some_and(|c| c.instance_id != state.instance_id);
+            let obs = crate::protocol::Observation {
+                status,
+                events: vec![],
+                next_cursor,
+                gap,
+                more: false,
+            };
+            write_response(writer, request_id, Response::Observation(obs)).await?;
+            Ok(None)
+        }
     }
 }
 
@@ -677,6 +696,7 @@ fn request_type_name(req: &Request) -> &'static str {
         Request::Index { .. } => "Index",
         Request::Status => "Status",
         Request::Shutdown => "Shutdown",
+        Request::Observe { .. } => "Observe",
     }
 }
 

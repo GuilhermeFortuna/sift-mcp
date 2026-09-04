@@ -11,7 +11,10 @@ use tokio::process::Command;
 
 use crate::codec::encode;
 use crate::paths::socket_path_for_store;
-use crate::protocol::{DaemonError, Envelope, PROTOCOL_VERSION, Request, Response};
+use crate::protocol::{
+    DaemonError, Envelope, EventCursor, OBSERVER_CLIENT, Observation, PROTOCOL_VERSION, Request,
+    Response,
+};
 
 pub struct DaemonClient {
     stream: UnixStream,
@@ -22,27 +25,49 @@ pub struct DaemonClient {
 
 impl DaemonClient {
     pub async fn connect(socket_path: &Path) -> Result<Self, DaemonError> {
+        Self::connect_with_client(socket_path, "daemon-client").await
+    }
+
+    /// Connect as a passive observer. Does not spawn a daemon.
+    pub async fn connect_observer(socket_path: &Path) -> Result<Self, DaemonError> {
+        Self::connect_with_client(socket_path, OBSERVER_CLIENT).await
+    }
+
+    async fn connect_with_client(socket_path: &Path, client: &str) -> Result<Self, DaemonError> {
         let stream = UnixStream::connect(socket_path)
             .await
             .map_err(|e| DaemonError::Internal {
                 detail: format!("connect {}: {e}", socket_path.display()),
             })?;
-        let mut client = Self {
+        let mut client_conn = Self {
             stream,
             next_id: 1,
             socket_path: socket_path.to_path_buf(),
         };
-        let resp = client
+        let resp = client_conn
             .request(Request::Hello {
                 protocol_version: PROTOCOL_VERSION,
-                client: "daemon-client".into(),
+                client: client.into(),
             })
             .await?;
         match resp {
-            Response::Hello { .. } => Ok(client),
+            Response::Hello { .. } => Ok(client_conn),
             Response::Error(e) => Err(e),
             other => Err(DaemonError::Malformed {
                 detail: format!("unexpected hello response: {other:?}"),
+            }),
+        }
+    }
+
+    /// Poll diagnostics and recent request events.
+    pub async fn observe(
+        &mut self,
+        after: Option<EventCursor>,
+    ) -> Result<Observation, DaemonError> {
+        match self.request(Request::Observe { after }).await? {
+            Response::Observation(obs) => Ok(obs),
+            other => Err(DaemonError::Malformed {
+                detail: format!("unexpected observe response: {other:?}"),
             }),
         }
     }

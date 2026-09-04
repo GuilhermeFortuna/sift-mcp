@@ -205,6 +205,9 @@ pub(crate) fn format_daemon_error(err: &DaemonError) -> String {
                 "Daemon error: {detail}. Ensure sift-daemon can start (check --store/--repo/--model) and the socket is reachable."
             )
         }
+        DaemonError::ObserverForbidden { operation } => {
+            format!("Observer cannot perform `{operation}`.")
+        }
     }
 }
 

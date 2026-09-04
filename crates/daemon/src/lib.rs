@@ -12,8 +12,10 @@ pub mod server;
 
 pub use client::DaemonClient;
 pub use protocol::{
-    DaemonError, DaemonStatus, Envelope, IndexMode, IndexPhase, IndexReportWire, MAX_REQUEST_BYTES,
-    PROTOCOL_VERSION, Request, Response,
+    ClientRole, DaemonError, DaemonStatus, Envelope, EventCursor, IndexMode, IndexPhase,
+    IndexProgressSnapshot, IndexReportWire, LastIndexCompletion, Lifecycle, MAX_REQUEST_BYTES,
+    OBSERVER_CLIENT, Observation, PROTOCOL_VERSION, PROTOCOL_VERSION_V1, Request, RequestEvent,
+    ResourceSnapshot, Response,
 };
 #[cfg(feature = "resident")]
 pub use server::{BindOutcome, Daemon, DaemonConfig};

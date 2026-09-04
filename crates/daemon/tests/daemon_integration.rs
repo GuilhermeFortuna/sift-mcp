@@ -151,7 +151,10 @@ async fn wait_ready(socket: &Path) {
     loop {
         if let Ok(mut c) = DaemonClient::connect(socket).await {
             match c.request(Request::Status).await {
-                Ok(Response::Status(s)) if !s.model_id.is_empty() && !s.indexing => {
+                Ok(Response::Status(s))
+                    if s.model_id.as_ref().is_some_and(|m| !m.is_empty())
+                        && s.lifecycle == daemon::Lifecycle::Ready =>
+                {
                     return;
                 }
                 Ok(Response::Status(_)) => {}
