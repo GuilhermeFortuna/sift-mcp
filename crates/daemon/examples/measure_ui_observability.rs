@@ -7,9 +7,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use daemon::measure::{
-    MeasureArgs, median_u64, nearest_rank_percentile, parse_measure_args,
-};
+use daemon::measure::{MeasureArgs, median_u64, nearest_rank_percentile, parse_measure_args};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -124,7 +122,8 @@ fn measure_one(
     // the wrapper script. Here we only exercise client-side timing against a
     // live socket derived from the store path.
     let _ = recording;
-    let _socket = daemon::paths::socket_path_for_store(&args.store).map_err(|e| format!("{e:?}"))?;
+    let _socket =
+        daemon::paths::socket_path_for_store(&args.store).map_err(|e| format!("{e:?}"))?;
     // Warmup: connect if daemon already running; otherwise the shell wrapper
     // is expected to have started it.
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;

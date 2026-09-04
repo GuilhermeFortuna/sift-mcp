@@ -21,7 +21,7 @@ pub fn median_u64(values: &[u64]) -> Option<u64> {
     let mut v = values.to_vec();
     v.sort_unstable();
     let mid = v.len() / 2;
-    if v.len() % 2 == 0 {
+    if v.len().is_multiple_of(2) {
         Some((v[mid - 1] + v[mid]) / 2)
     } else {
         Some(v[mid])
@@ -67,7 +67,9 @@ pub fn parse_measure_args(args: &[String]) -> Result<MeasureArgs, MeasureArgsErr
         match args[i].as_str() {
             "--repo" => {
                 i += 1;
-                repo = Some(PathBuf::from(args.get(i).ok_or(MeasureArgsError::Missing("repo"))?));
+                repo = Some(PathBuf::from(
+                    args.get(i).ok_or(MeasureArgsError::Missing("repo"))?,
+                ));
             }
             "--store" => {
                 i += 1;
@@ -134,18 +136,8 @@ mod tests {
         assert!(matches!(err, MeasureArgsError::Missing("repo")));
 
         let args = [
-            "--repo",
-            "/r",
-            "--store",
-            "/s",
-            "--model",
-            "/m",
-            "--daemon",
-            "/d",
-            "--runs",
-            "0",
-            "--output",
-            "/o",
+            "--repo", "/r", "--store", "/s", "--model", "/m", "--daemon", "/d", "--runs", "0",
+            "--output", "/o",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -159,18 +151,8 @@ mod tests {
     #[test]
     fn parse_accepts_valid_args() {
         let args = [
-            "--repo",
-            "/r",
-            "--store",
-            "/s",
-            "--model",
-            "/m",
-            "--daemon",
-            "/d",
-            "--runs",
-            "3",
-            "--output",
-            "/o",
+            "--repo", "/r", "--store", "/s", "--model", "/m", "--daemon", "/d", "--runs", "3",
+            "--output", "/o",
         ]
         .into_iter()
         .map(str::to_owned)
