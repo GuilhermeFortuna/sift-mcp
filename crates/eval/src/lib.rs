@@ -3,6 +3,7 @@
 pub mod corpus;
 pub mod error;
 pub mod metrics;
+pub mod mine;
 
 pub use corpus::{
     FIRST_PARTY_CORPUS_DEFAULT_PATH, HARNESS_VERSION, MINED_CORPUS_DEFAULT_PATH,
@@ -10,3 +11,6 @@ pub use corpus::{
 };
 pub use error::EvalError;
 pub use metrics::{BytesBeforeHit, Metrics, percentile, reciprocal_rank, top_k_accuracy};
+pub use mine::{
+    Label, LabelSource, MiningConfig, MiningReport, RejectReason, mine_commits, mine_docstrings,
+};
