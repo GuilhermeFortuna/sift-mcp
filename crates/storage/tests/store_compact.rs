@@ -74,3 +74,30 @@ fn compact_reclaims_dead_rows_preserving_live_data() {
     new_ids.sort_unstable();
     assert_eq!(new_ids, (0..700).collect::<Vec<_>>());
 }
+
+#[test]
+fn compact_publishes_a_reopenable_pair() {
+    let dir = tempdir().unwrap();
+    let mut store = ChunkStore::create(dir.path(), 4, "m").unwrap();
+    store
+        .insert_batch(&[(rec(1), vec![f16::from_f32(1.0); 4])])
+        .unwrap();
+    store.tombstone(&[storage::RowId::from_u64(0)]).unwrap();
+    store
+        .insert_batch(&[(rec(2), vec![f16::from_f32(2.0); 4])])
+        .unwrap();
+    store.compact().unwrap();
+    drop(store);
+
+    let reopened = ChunkStore::open(dir.path()).unwrap();
+    assert!(matches!(
+        reopened.verify().unwrap(),
+        Integrity::Ok { live: 1 }
+    ));
+    let row = reopened
+        .get_by_hash(&rec(2).content_hash)
+        .unwrap()
+        .expect("live row after compaction")
+        .0;
+    assert_eq!(row.get(), 0);
+}

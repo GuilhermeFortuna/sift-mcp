@@ -62,6 +62,7 @@ pub enum Request {
     },
     Index {
         mode: IndexMode,
+        repo_dir: std::path::PathBuf,
     },
     Status,
     Shutdown,

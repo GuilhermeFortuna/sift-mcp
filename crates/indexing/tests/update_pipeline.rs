@@ -252,6 +252,32 @@ fn dirty_policy_index_worktree_marks_commit() {
 }
 
 #[test]
+fn first_update_reconciles_dirty_paths_after_clean_index() {
+    let h = Harness::new(&[CommitSpec::new("init").file("a.rs", sample_fn("original"))]);
+    let mut indexer = h.indexer(IndexConfig::default());
+    indexer.index_all(&mut NullProgress).unwrap();
+    drop(indexer);
+
+    std::fs::write(h.repo.path().join("a.rs"), sample_fn("working_tree_change")).unwrap();
+    let mut indexer = h.reopen(IndexConfig::default());
+    let report = indexer.update(&mut NullProgress).unwrap();
+    assert_eq!(report.embeddings_computed, 1, "{report:?}");
+    assert!(indexer.store().rows_for_file("a.rs").is_ok());
+}
+
+#[test]
+fn duplicate_normalized_chunks_are_counted_once() {
+    let h = Harness::new(&[CommitSpec::new("init")
+        .file("a.rs", sample_fn("same"))
+        .file("b.rs", sample_fn("same"))]);
+    let mut indexer = h.indexer(IndexConfig::default());
+    let report = indexer.index_all(&mut NullProgress).unwrap();
+    assert_eq!(report.chunks_added, 1, "{report:?}");
+    assert_eq!(report.embeddings_computed, 1, "{report:?}");
+    report.assert_reconciles();
+}
+
+#[test]
 fn dirty_policy_refuse_errors() {
     let h = Harness::new(&[CommitSpec::new("init").file("a.rs", sample_fn("a"))]);
     h.repo.write_uncommitted("a.rs", &sample_fn("dirty"));

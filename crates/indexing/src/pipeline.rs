@@ -235,11 +235,9 @@ impl<'a> Indexer<'a> {
 
         let mut work = Vec::new();
 
-        if dirty
-            && matches!(self.config.dirty_worktree, DirtyPolicy::IndexWorktree)
-            && base.ends_with(DIRTY_COMMIT_SUFFIX)
-        {
-            // Prior index included dirty files — fully reconcile those paths.
+        if dirty && matches!(self.config.dirty_worktree, DirtyPolicy::IndexWorktree) {
+            // Always reconcile dirty paths. This is required when a clean
+            // indexed commit is followed by an uncommitted edit.
             for path in self.git.dirty_paths()? {
                 if let Some(item) = self.work_item_for_path(&path, &mut report)? {
                     work.push(item);
@@ -530,6 +528,12 @@ impl<'a> Indexer<'a> {
 
         let existing_for_parse = existing.clone();
         let mut consume_err: Option<IndexError> = None;
+        let mut known_hashes = HashSet::new();
+        for row in self.store.live_rows()? {
+            if let Some(record) = self.store.get(row)? {
+                known_hashes.insert(record.content_hash);
+            }
+        }
 
         std::thread::scope(|scope| {
             scope.spawn(|| {
@@ -629,6 +633,15 @@ impl<'a> Indexer<'a> {
                                 report.chunks_reused += 1;
                                 continue;
                             }
+                            // Another changed file may already have inserted
+                            // the same normalized body. Reuse that row too;
+                            // never spend embedding time on a hash the store
+                            // already owns.
+                            if known_hashes.contains(&rec.content_hash) {
+                                report.chunks_reused += 1;
+                                continue;
+                            }
+                            known_hashes.insert(rec.content_hash);
                             pending.push((rec, body));
                             pending_rels.push(rel.clone());
                             if pending.len() >= self.config.embed_batch {
@@ -671,13 +684,26 @@ impl<'a> Indexer<'a> {
             return Ok(());
         }
         progress.phase(Phase::Embedding, report.embeddings_computed, None);
-        let texts: Vec<&str> = pending.iter().map(|(_, b)| b.as_str()).collect();
+        // A batch can contain identical normalized bodies from different
+        // files. The store intentionally shares one embedding row for those
+        // hashes, so embed and index one deterministic representative only.
+        let mut seen = HashSet::new();
+        let mut unique = Vec::with_capacity(pending.len());
+        for item in pending.drain(..) {
+            if seen.insert(item.0.content_hash) {
+                unique.push(item);
+            }
+        }
+        if unique.is_empty() {
+            return Ok(());
+        }
+        let texts: Vec<&str> = unique.iter().map(|(_, b)| b.as_str()).collect();
         let t_embed = Instant::now();
         let embeddings = self.embedder.embed(&texts, Role::Document)?;
         report.embed_millis += t_embed.elapsed().as_millis() as u64;
 
-        assert_eq!(embeddings.len(), pending.len());
-        let lexical_docs: Vec<_> = pending
+        assert_eq!(embeddings.len(), unique.len());
+        let lexical_docs: Vec<_> = unique
             .iter()
             .map(|(rec, body)| {
                 (
@@ -693,7 +719,7 @@ impl<'a> Indexer<'a> {
             })
             .collect();
         let mut batch = Vec::with_capacity(pending.len());
-        for ((rec, _), emb) in pending.iter().zip(embeddings) {
+        for ((rec, _), emb) in unique.iter().zip(embeddings) {
             if emb.truncated {
                 report.chunks_truncated += 1;
             }
@@ -714,8 +740,6 @@ impl<'a> Indexer<'a> {
         pending.clear();
 
         let novel = batch.len() as u64;
-        // Count as added only hashes that were not already live — insert_batch reuses.
-        // We only put novel hashes in pending, so all are added.
         report.chunks_added += novel;
         report.embeddings_computed += novel;
         self.batches_committed += 1;

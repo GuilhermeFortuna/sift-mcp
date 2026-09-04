@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use daemon::{Daemon, DaemonConfig};
-use inference::MockEmbedder;
+use inference::OnnxEmbedder;
 use retrieval::FusionConfig;
 use tracing_subscriber::EnvFilter;
 
@@ -60,15 +60,13 @@ async fn main() {
         None => daemon::paths::socket_path_for_store(&store_dir).expect("socket path"),
     };
 
-    // CPU default: mock embedder sized from an open store if present.
-    let dims = storage::ChunkStore::open(&store_dir)
-        .map(|s| s.matrix().dims())
-        .unwrap_or(8);
-    let model_id = storage::ChunkStore::open(&store_dir)
-        .map(|s| s.matrix().model_id().to_owned())
-        .unwrap_or_else(|_| "mock".into());
-    let embedder =
-        Arc::new(MockEmbedder::new(dims).with_model_id(&model_id)) as Arc<dyn inference::Embedder>;
+    let embedder = match OnnxEmbedder::load(&model_dir, 32) {
+        Ok(embedder) => Arc::new(embedder) as Arc<dyn inference::Embedder>,
+        Err(error) => {
+            eprintln!("load CUDA embedder failed: {error}");
+            std::process::exit(1);
+        }
+    };
 
     let config = DaemonConfig {
         store_dir,

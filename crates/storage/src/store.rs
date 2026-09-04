@@ -10,6 +10,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 const DB_NAME: &str = "chunks.db";
 const MATRIX_NAME: &str = "embeddings.f16";
+const MANIFEST_NAME: &str = "store.manifest";
 
 /// Counts used by SIFT-006 to decide when to compact.
 #[derive(Debug, Clone, PartialEq)]
@@ -141,8 +142,7 @@ impl ChunkStore {
     }
 
     pub fn open(dir: &Path) -> Result<Self, StoreError> {
-        let db_path = dir.join(DB_NAME);
-        let matrix_path = dir.join(MATRIX_NAME);
+        let (db_path, matrix_path) = active_paths(dir)?;
         let conn = Connection::open(&db_path)?;
         configure_connection(&conn)?;
         let version: u32 = meta_u32(&conn, "schema_version")?;
@@ -519,8 +519,18 @@ impl ChunkStore {
             }
         }
 
-        let tmp_db = self.dir.join("chunks.db.compact");
-        let tmp_matrix = self.dir.join("embeddings.f16.compact");
+        let generation = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let new_db_name = format!("{DB_NAME}.generation-{generation}");
+        let new_matrix_name = format!("{MATRIX_NAME}.generation-{generation}");
+        let tmp_db = self.dir.join(&new_db_name);
+        let tmp_matrix = self.dir.join(&new_matrix_name);
         let _ = std::fs::remove_file(&tmp_db);
         let _ = std::fs::remove_file(&tmp_matrix);
 
@@ -554,22 +564,32 @@ impl ChunkStore {
             f.set_len(file_len)?;
         }
 
-        let db_path = self.dir.join(DB_NAME);
-        let matrix_path = self.dir.join(MATRIX_NAME);
+        let old_matrix_path = self.matrix_ref().path().to_path_buf();
+        let (old_db_path, _) = active_paths_without_manifest(&self.dir, &old_matrix_path)?;
 
-        // Close open handles so rename replaces the files we will reopen.
-        let old_conn = std::mem::replace(&mut self.conn, Connection::open_in_memory()?);
-        let _ = old_conn.close();
-        self.matrix = None;
+        // Publish one manifest naming the already-complete pair. A crash
+        // before this rename leaves the old pair active; a crash after it
+        // leaves both new halves selected together. The old pair is retained
+        // until the new pair has been opened successfully.
+        publish_manifest(&self.dir, &new_db_name, &new_matrix_name)?;
 
-        std::fs::rename(&tmp_matrix, &matrix_path)?;
-        std::fs::rename(&tmp_db, &db_path)?;
-
-        let conn = Connection::open(&db_path)?;
+        let conn = Connection::open(&tmp_db)?;
         configure_connection(&conn)?;
-        let matrix = EmbeddingMatrix::open_mut(&matrix_path)?;
-        self.conn = conn;
+        let matrix = EmbeddingMatrix::open_mut(&tmp_matrix)?;
+
+        let old_conn = std::mem::replace(&mut self.conn, conn);
+        let _ = old_conn.close();
         self.matrix = Some(matrix);
+
+        // Cleanup is deliberately after manifest publication and reopening.
+        // Failure here is harmless: the manifest still points at a complete
+        // pair and the stale generation can be removed on a later compaction.
+        if old_matrix_path != tmp_matrix {
+            let _ = std::fs::remove_file(old_matrix_path);
+        }
+        if old_db_path != tmp_db {
+            let _ = std::fs::remove_file(old_db_path);
+        }
 
         let live_after = self.stats()?.live;
         let row_mapping = live_rows
@@ -638,6 +658,78 @@ impl ChunkStore {
     pub fn conn_mut(&mut self) -> &mut Connection {
         &mut self.conn
     }
+}
+
+fn active_paths(dir: &Path) -> Result<(PathBuf, PathBuf), StoreError> {
+    if !dir.join(MANIFEST_NAME).exists() {
+        return Ok((dir.join(DB_NAME), dir.join(MATRIX_NAME)));
+    }
+    let text = std::fs::read_to_string(dir.join(MANIFEST_NAME))?;
+    if !text.lines().any(|line| line == "version=1") {
+        return Err(invalid_manifest(
+            "version",
+            "unsupported or missing version",
+        ));
+    }
+    let mut db = None;
+    let mut matrix = None;
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix("db=") {
+            db = Some(value.to_owned());
+        } else if let Some(value) = line.strip_prefix("matrix=") {
+            matrix = Some(value.to_owned());
+        }
+    }
+    let db = manifest_name(db, "db")?;
+    let matrix = manifest_name(matrix, "matrix")?;
+    Ok((dir.join(db), dir.join(matrix)))
+}
+
+/// Resolve the pre-compaction pair while the in-memory store still owns it.
+fn active_paths_without_manifest(
+    dir: &Path,
+    matrix_path: &Path,
+) -> Result<(PathBuf, PathBuf), StoreError> {
+    let (db, _) = active_paths(dir)?;
+    Ok((db, matrix_path.to_path_buf()))
+}
+
+fn manifest_name(value: Option<String>, field: &str) -> Result<String, StoreError> {
+    let value = value.ok_or_else(|| invalid_manifest(field, "missing value"))?;
+    let path = Path::new(&value);
+    if value.is_empty()
+        || path.components().count() != 1
+        || path.has_root()
+        || !matches!(
+            path.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+    {
+        return Err(invalid_manifest(field, "value must be a relative filename"));
+    }
+    Ok(value)
+}
+
+fn invalid_manifest(field: &str, detail: &str) -> StoreError {
+    StoreError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("invalid store manifest {field}: {detail}"),
+    ))
+}
+
+fn publish_manifest(dir: &Path, db: &str, matrix: &str) -> Result<(), StoreError> {
+    let tmp = dir.join(format!("{MANIFEST_NAME}.tmp-{}", std::process::id()));
+    let mut file = std::fs::File::create(&tmp)?;
+    use std::io::Write;
+    writeln!(file, "version=1")?;
+    writeln!(file, "db={db}")?;
+    writeln!(file, "matrix={matrix}")?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, dir.join(MANIFEST_NAME))?;
+    if let Ok(dir_file) = std::fs::File::open(dir) {
+        let _ = dir_file.sync_all();
+    }
+    Ok(())
 }
 
 fn configure_connection(conn: &Connection) -> Result<(), StoreError> {

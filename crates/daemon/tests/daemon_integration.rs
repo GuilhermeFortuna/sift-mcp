@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use daemon::DaemonClient;
 use daemon::protocol::{DaemonError, IndexMode, Request, Response};
+use daemon::resident::Resident;
 use daemon::server::{BindOutcome, Daemon, DaemonConfig};
 use futures::StreamExt;
 use indexing::{IndexConfig, Indexer, NullProgress};
@@ -111,6 +112,17 @@ fn init_git_repo(path: &Path) {
         .current_dir(path)
         .status()
         .unwrap();
+}
+
+#[test]
+fn fresh_store_bootstraps_on_resident_load() {
+    let store_dir = TempDir::new().unwrap();
+    let repo_dir = TempDir::new().unwrap();
+    let embedder = Arc::new(MockEmbedder::new(DIMS)) as Arc<dyn Embedder>;
+    let resident = Resident::load(store_dir.path(), repo_dir.path(), embedder).unwrap();
+    assert_eq!(resident.store.stats().unwrap().live, 0);
+    assert!(store_dir.path().join("chunks.db").is_file());
+    assert!(store_dir.path().join("embeddings.f16").is_file());
 }
 
 fn write_rs(repo: &Path, rel: &str, body: &str) {
@@ -351,12 +363,14 @@ async fn get_symbol_found_absent_ambiguous() {
 
     let mut client = DaemonClient::connect(&socket).await.unwrap();
     // Reindex to pick up second alpha.
-    let mut stream = client
+    let stream = client
         .request_streaming(Request::Index {
             mode: IndexMode::Full,
+            repo_dir: h.repo.path().to_path_buf(),
         })
         .await
         .unwrap();
+    futures::pin_mut!(stream);
     while let Some(frame) = stream.next().await {
         if matches!(frame, Response::IndexDone(_)) {
             break;
@@ -406,12 +420,14 @@ async fn index_streams_progress_and_done() {
     wait_ready(&socket).await;
 
     let mut client = DaemonClient::connect(&socket).await.unwrap();
-    let mut stream = client
+    let stream = client
         .request_streaming(Request::Index {
             mode: IndexMode::Update,
+            repo_dir: h.repo.path().to_path_buf(),
         })
         .await
         .unwrap();
+    futures::pin_mut!(stream);
     let mut saw_progress = false;
     let mut saw_done = false;
     while let Some(frame) = stream.next().await {
@@ -454,14 +470,17 @@ async fn search_during_index_stays_consistent() {
     git_commit(h.repo.path(), "add beta");
 
     let s_idx = socket.clone();
+    let repo_dir = h.repo.path().to_path_buf();
     let indexer = tokio::spawn(async move {
         let mut c = DaemonClient::connect(&s_idx).await.unwrap();
-        let mut stream = c
+        let stream = c
             .request_streaming(Request::Index {
                 mode: IndexMode::Full,
+                repo_dir,
             })
             .await
             .unwrap();
+        futures::pin_mut!(stream);
         while stream.next().await.is_some() {}
     });
 
@@ -514,14 +533,17 @@ async fn second_index_returns_in_progress() {
 
     let s1 = socket.clone();
     let s2 = socket.clone();
+    let repo_dir = h.repo.path().to_path_buf();
     let indexer = tokio::spawn(async move {
         let mut c = DaemonClient::connect(&s1).await.unwrap();
-        let mut stream = c
+        let stream = c
             .request_streaming(Request::Index {
                 mode: IndexMode::Update,
+                repo_dir,
             })
             .await
             .unwrap();
+        futures::pin_mut!(stream);
         while stream.next().await.is_some() {}
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -529,6 +551,7 @@ async fn second_index_returns_in_progress() {
     let err = c2
         .request(Request::Index {
             mode: IndexMode::Update,
+            repo_dir: h.repo.path().to_path_buf(),
         })
         .await;
     assert!(matches!(err, Err(DaemonError::IndexInProgress)), "{err:?}");

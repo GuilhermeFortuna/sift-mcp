@@ -8,11 +8,7 @@ use crate::protocol::DaemonError;
 
 /// Derive a deterministic runtime directory for a store's socket and lock.
 pub fn runtime_dir_for_store(store_dir: &Path) -> Result<PathBuf, DaemonError> {
-    let canonical = store_dir
-        .canonicalize()
-        .map_err(|e| DaemonError::Internal {
-            detail: format!("canonicalize store {}: {e}", store_dir.display()),
-        })?;
+    let canonical = stable_store_path(store_dir)?;
     let hash = blake3::hash(canonical.to_string_lossy().as_bytes());
     let hex = hash.to_hex();
     let short = &hex.as_str()[..16];
@@ -25,6 +21,39 @@ pub fn runtime_dir_for_store(store_dir: &Path) -> Result<PathBuf, DaemonError> {
         });
 
     Ok(base.join("sift").join(short))
+}
+
+/// Return a stable absolute path even before the store has been created.
+/// Existing paths are canonicalized so symlink aliases share one daemon; a
+/// missing store uses its canonicalized parent and the requested leaf.
+fn stable_store_path(store_dir: &Path) -> Result<PathBuf, DaemonError> {
+    if store_dir.exists() {
+        return store_dir.canonicalize().map_err(|e| DaemonError::Internal {
+            detail: format!("canonicalize store {}: {e}", store_dir.display()),
+        });
+    }
+
+    let absolute = if store_dir.is_absolute() {
+        store_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| DaemonError::Internal {
+                detail: format!("resolve current directory: {e}"),
+            })?
+            .join(store_dir)
+    };
+    let leaf = absolute.file_name().ok_or_else(|| DaemonError::Internal {
+        detail: format!("store path has no leaf: {}", store_dir.display()),
+    })?;
+    let parent = absolute.parent().unwrap_or_else(|| Path::new("."));
+    let parent = if parent.exists() {
+        parent.canonicalize().map_err(|e| DaemonError::Internal {
+            detail: format!("canonicalize store parent {}: {e}", parent.display()),
+        })?
+    } else {
+        parent.to_path_buf()
+    };
+    Ok(parent.join(leaf))
 }
 
 pub fn socket_path_for_store(store_dir: &Path) -> Result<PathBuf, DaemonError> {
@@ -198,6 +227,15 @@ mod tests {
         let p1 = socket_path_for_store(&s1).unwrap();
         let p2 = socket_path_for_store(&s2).unwrap();
         assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn socket_path_can_be_derived_before_store_exists() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("new-store");
+        let path = socket_path_for_store(&missing).unwrap();
+        assert!(path.ends_with("daemon.sock"));
+        assert_eq!(path, socket_path_for_store(&missing).unwrap());
     }
 
     #[test]

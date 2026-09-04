@@ -450,7 +450,7 @@ async fn dispatch_request(
             write_response(writer, request_id, resp).await?;
             Ok(None)
         }
-        Request::Index { mode } => {
+        Request::Index { mode, repo_dir } => {
             if state
                 .indexing
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -460,10 +460,11 @@ async fn dispatch_request(
             }
             let delay = *state.index_phase_delay.lock();
             let full = matches!(mode, IndexMode::Full);
+            let repo_dir = repo_dir.clone();
             let state_c = Arc::clone(state);
 
-            let (progress_tx, progress_rx) = std::sync::mpsc::channel();
-            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (done_tx, mut done_rx) = tokio::sync::oneshot::channel();
 
             std::thread::spawn(move || {
                 let clear_indexing = || {
@@ -501,7 +502,7 @@ async fn dispatch_request(
                         return;
                     }
                 };
-                let (frozen, store, repo_dir, embedder) = split;
+                let (frozen, store, _resident_repo_dir, embedder) = split;
                 *state_c.serving.write().unwrap() = ServingState::Indexing(Arc::new(frozen));
 
                 if let Some(d) = delay {
@@ -539,29 +540,22 @@ async fn dispatch_request(
                 }
             });
 
-            let progress_rx = tokio::task::spawn_blocking(move || {
-                let mut frames = Vec::new();
-                while let Ok((phase, done, total)) = progress_rx.recv() {
-                    frames.push(Response::IndexProgress {
-                        phase: crate::protocol::IndexPhase::from(phase),
-                        done,
-                        total,
-                    });
+            let final_res = loop {
+                tokio::select! {
+                    Some((phase, done, total)) = progress_rx.recv() => {
+                        write_response(writer, request_id, Response::IndexProgress {
+                            phase: crate::protocol::IndexPhase::from(phase),
+                            done,
+                            total,
+                        }).await?;
+                    }
+                    result = &mut done_rx => {
+                        break result.unwrap_or(Err(DaemonError::Internal {
+                            detail: "index worker vanished".into(),
+                        }));
+                    }
                 }
-                let final_res = done_rx.recv().unwrap_or(Err(DaemonError::Internal {
-                    detail: "index worker vanished".into(),
-                }));
-                (frames, final_res)
-            })
-            .await
-            .map_err(|e| DaemonError::Internal {
-                detail: format!("join: {e}"),
-            })?;
-
-            let (frames, final_res) = progress_rx;
-            for frame in frames {
-                write_response(writer, request_id, frame).await?;
-            }
+            };
             match final_res {
                 Ok(report) => {
                     write_response(writer, request_id, index_report_response(&report)).await?;

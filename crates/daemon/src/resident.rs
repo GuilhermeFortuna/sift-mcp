@@ -202,8 +202,16 @@ impl Resident {
         repo_dir: &Path,
         embedder: Arc<dyn Embedder>,
     ) -> Result<Self, DaemonError> {
-        let store = ChunkStore::open(store_dir).map_err(|e| DaemonError::Internal {
-            detail: format!("open store: {e}"),
+        let db_exists = store_dir.join("chunks.db").exists();
+        let matrix_exists = store_dir.join("embeddings.f16").exists();
+        let manifest_exists = store_dir.join("store.manifest").exists();
+        let store = if !db_exists && !matrix_exists && !manifest_exists {
+            ChunkStore::create(store_dir, embedder.dims(), embedder.model_id())
+        } else {
+            ChunkStore::open(store_dir)
+        }
+        .map_err(|e| DaemonError::Internal {
+            detail: format!("open or create store: {e}"),
         })?;
         store
             .require_model(embedder.model_id())
@@ -569,7 +577,7 @@ pub fn resolve_symbol(
 }
 
 pub struct ProgressForwarder {
-    pub tx: std::sync::mpsc::Sender<(Phase, u64, Option<u64>)>,
+    pub tx: tokio::sync::mpsc::UnboundedSender<(Phase, u64, Option<u64>)>,
     pub delay: Option<Duration>,
 }
 

@@ -319,9 +319,9 @@ impl SiftMcpServer {
         if let Err(e) = params::validate(&p) {
             return Ok(param_error_result(e));
         }
-        // Path selects the repo for spawn; wire Index only carries mode.
-        // When already connected, Index uses the daemon's configured repo.
-        let _path = PathBuf::from(&p.path);
+        // The path selects the repo for spawn and is also carried on the wire
+        // so an already-connected daemon cannot silently index another repo.
+        let repo_dir = PathBuf::from(&p.path);
         let mode = if p.full {
             IndexMode::Full
         } else {
@@ -334,10 +334,14 @@ impl SiftMcpServer {
 
         let mut guard = self.client.lock().await;
         let client = guard.as_mut().expect("client");
-        let mut stream = match client.request_streaming(Request::Index { mode }).await {
+        let stream = match client
+            .request_streaming(Request::Index { mode, repo_dir })
+            .await
+        {
             Ok(s) => s,
             Err(e) => return Ok(to_tool_error(e)),
         };
+        futures::pin_mut!(stream);
 
         let progress_token = ctx
             .meta

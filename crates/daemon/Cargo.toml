@@ -43,4 +43,9 @@ tracing-subscriber = { workspace = true }
 [[bin]]
 name = "sift-daemon"
 path = "src/bin/sift-daemon.rs"
+required-features = ["cuda"]
+
+[[bin]]
+name = "sift-daemon-test"
+path = "src/bin/sift-daemon-test.rs"
 required-features = ["resident"]

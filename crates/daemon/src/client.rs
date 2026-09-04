@@ -122,8 +122,8 @@ impl DaemonClient {
         }
     }
 
-    /// Yields IndexProgress frames until IndexDone (returned as final Ok item via stream end
-    /// after the done frame is yielded). Errors surface as a single Error response item.
+    /// Yields IndexProgress frames as they arrive, followed by IndexDone or an
+    /// Error response. The stream borrows this client until its terminal frame.
     pub async fn request_streaming(
         &mut self,
         req: Request,
@@ -142,24 +142,26 @@ impl DaemonClient {
                 detail: format!("write: {e}"),
             })?;
 
-        let mut frames = Vec::new();
-        loop {
-            let resp_env: Envelope<Response> = read_envelope(&mut self.stream).await?;
-            if resp_env.request_id != id {
-                return Err(DaemonError::Malformed {
-                    detail: "streaming response id mismatch".into(),
-                });
-            }
-            let done = matches!(
-                resp_env.payload,
-                Response::IndexDone(_) | Response::Error(_)
-            );
-            frames.push(resp_env.payload);
-            if done {
-                break;
-            }
-        }
-        Ok(stream::iter(frames))
+        Ok(stream::unfold(
+            (self, id, false),
+            |(client, id, done)| async move {
+                if done {
+                    return None;
+                }
+                let payload = match read_envelope(&mut client.stream).await {
+                    Ok(response) if response.request_id == id => response.payload,
+                    Ok(response) => Response::Error(DaemonError::Malformed {
+                        detail: format!(
+                            "streaming response id mismatch: expected {id}, got {}",
+                            response.request_id
+                        ),
+                    }),
+                    Err(error) => Response::Error(error),
+                };
+                let terminal = matches!(payload, Response::IndexDone(_) | Response::Error(_));
+                Some((payload, (client, id, terminal)))
+            },
+        ))
     }
 }
 

@@ -292,14 +292,14 @@ async fn cold_start_spawns_daemon_and_searches() {
         std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
     }
 
-    let bin = std::env::var_os("CARGO_BIN_EXE_sift-daemon")
+    let bin = std::env::var_os("CARGO_BIN_EXE_sift_daemon_test")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/sift-daemon")
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/sift-daemon-test")
         });
     if !bin.exists() {
         let status = std::process::Command::new("cargo")
-            .args(["build", "-p", "daemon", "--bin", "sift-daemon"])
+            .args(["build", "-p", "daemon", "--bin", "sift-daemon-test"])
             .status()
             .unwrap();
         assert!(status.success());
@@ -307,7 +307,7 @@ async fn cold_start_spawns_daemon_and_searches() {
     let bin = if bin.exists() {
         bin
     } else {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/sift-daemon")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/sift-daemon-test")
     };
     assert!(bin.exists(), "sift-daemon missing at {}", bin.display());
 
