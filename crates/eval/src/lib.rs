@@ -4,6 +4,7 @@ pub mod corpus;
 pub mod error;
 pub mod metrics;
 pub mod mine;
+pub mod proxy;
 pub mod run;
 
 pub use corpus::{
@@ -16,6 +17,7 @@ pub use mine::{
     Label, LabelSource, MiningConfig, MiningReport, RejectReason, build_held_out_index,
     mine_commits, mine_docstrings, strip_doc_comments,
 };
+pub use proxy::{BASELINE_COMMAND, bytes_before_hit, median_bytes_before_hit};
 pub use run::{
     Ablation, EvalRun, FusionConfigSerde, LengthBucket, RunManifest, evaluate, partition_labels,
 };

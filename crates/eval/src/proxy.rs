@@ -171,8 +171,7 @@ fn fallback_walk_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mine::{Label, LabelSource};
-    use retrieval::{FusionConfig, SearchDiagnostics, SearchResponse, SearchResult, StageTimings};
+    use retrieval::{SearchDiagnostics, SearchResponse, SearchResult, StageTimings};
 
     #[test]
     fn proxy_kpi_hand_computed_bytes_and_records_baseline_command() {
@@ -241,25 +240,12 @@ mod tests {
         assert_eq!(mcp, first + second);
 
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(dir.path().join("a.rs"), "aaaa").unwrap(); // 4 bytes
-        std::fs::write(dir.path().join("hit.rs"), "hhhhhhhh").unwrap(); // 8 bytes
-        // Without rg match order, fallback walks sorted: a.rs then hit.rs → 4+8=12
-        let (bytes, cmd) =
-            baseline_bytes_to_file(dir.path(), "target query", "hit.rs").unwrap();
-        assert!(
-            cmd.starts_with(BASELINE_COMMAND),
-            "baseline command must be recorded verbatim, got {cmd}"
-        );
-        assert!(cmd.contains("target"));
-        // Either rg found nothing useful and walked, or rg returned files — just require > 0
-        // when the file exists.
-        let _ = bytes;
-        let label = Label {
-            query: "target".into(),
-            expected: expected.clone(),
-            source: LabelSource::CommitSubject,
-            provenance: "x".into(),
-        };
-        let _ = (&label, FusionConfig::default());
+        // Sorted walk: a.rs (4) then hit.rs (8) → 12 when expected is hit.rs.
+        std::fs::write(dir.path().join("a.rs"), "aaaa").unwrap();
+        std::fs::write(dir.path().join("hit.rs"), "hhhhhhhh").unwrap();
+        let (bytes, cmd) = fallback_walk_bytes(dir.path(), "hit.rs", BASELINE_COMMAND).unwrap();
+        assert_eq!(bytes, 12);
+        assert_eq!(cmd, BASELINE_COMMAND);
+        assert!(cmd.starts_with("rg "));
     }
 }
