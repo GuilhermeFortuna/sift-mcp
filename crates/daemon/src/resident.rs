@@ -190,11 +190,7 @@ impl SharedState {
         self.next_connection_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub fn record_terminal(
-        &self,
-        draft: crate::observe::TerminalEventDraft,
-        elapsed: Duration,
-    ) {
+    pub fn record_terminal(&self, draft: crate::observe::TerminalEventDraft, elapsed: Duration) {
         if !self.record_events.load(Ordering::Relaxed) {
             return;
         }
