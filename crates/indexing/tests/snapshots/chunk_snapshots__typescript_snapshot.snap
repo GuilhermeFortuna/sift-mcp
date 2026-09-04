@@ -1,0 +1,11 @@
+---
+source: crates/indexing/tests/chunk_snapshots.rs
+assertion_line: 78
+expression: "snapshot_lines(\"sample.ts\", Language::TypeScript, source)"
+---
+freeFunction function 2:5
+documented function 8:10
+Tracker class 12:22
+Tracker::constructor function 15:17
+Tracker::update function 19:21
+itWorks function 24:26

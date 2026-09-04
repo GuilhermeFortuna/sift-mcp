@@ -1,0 +1,19 @@
+# Pinned dependencies for one-time model export and verification.
+# Not referenced by any runtime crate. Install with:
+#   python3 -m venv tools/.venv
+#   tools/.venv/bin/pip install -r tools/requirements.txt
+#
+# Prefer a CPU torch wheel when disk quota is tight:
+#   tools/.venv/bin/pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
+# then install the remaining lines below. A CUDA torch of the same version also works.
+torch==2.14.0
+transformers==4.57.6
+optimum==1.27.0
+onnx==1.22.0
+onnxscript==0.7.1
+onnxruntime==1.29.0
+numpy==2.5.2
+huggingface_hub==0.36.0
+sentencepiece==0.2.1
+protobuf==6.33.1
+einops==0.8.1

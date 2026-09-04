@@ -1,0 +1,14 @@
+{
+  "model_id": "test/model@abc123",
+  "revision": "abc123",
+  "dims": 1024,
+  "max_sequence_length": 512,
+  "pooling": "last_token",
+  "normalize": "l2",
+  "query_prefix": "Instruct: query\nQuery: ",
+  "document_prefix": null,
+  "opset": 18,
+  "precision": "fp16",
+  "onnx_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "tokenizer_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}

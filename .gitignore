@@ -1,0 +1,9 @@
+/target/
+/models/
+*.onnx
+/index/
+/store/
+/.ort/
+/onnxruntime/
+/tools/.venv/
+__pycache__/

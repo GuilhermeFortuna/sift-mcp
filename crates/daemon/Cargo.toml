@@ -1,0 +1,51 @@
+[package]
+name = "daemon"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[features]
+default = ["resident"]
+# Full resident daemon (indexes, models, socket server). Off for thin MCP clients.
+resident = [
+  "dep:storage",
+  "dep:indexing",
+  "dep:inference",
+  "retrieval/engine",
+]
+cuda = ["resident", "inference/cuda"]
+
+[dependencies]
+storage = { path = "../storage", optional = true }
+indexing = { path = "../indexing", optional = true }
+retrieval = { path = "../retrieval", default-features = false }
+inference = { path = "../inference", optional = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+fs4 = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+indexing = { path = "../indexing" }
+inference = { path = "../inference" }
+storage = { path = "../storage" }
+retrieval = { path = "../retrieval", features = ["engine"] }
+futures = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[bin]]
+name = "sift-daemon"
+path = "src/bin/sift-daemon.rs"
+required-features = ["cuda"]
+
+[[bin]]
+name = "sift-daemon-test"
+path = "src/bin/sift-daemon-test.rs"
+required-features = ["resident"]

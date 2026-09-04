@@ -1,0 +1,10 @@
+---
+source: crates/indexing/tests/chunk_snapshots.rs
+assertion_line: 102
+expression: "snapshot_lines(\"sample.go\", Language::Go, source)"
+---
+FreeFunction function 3:7
+Documented function 9:12
+Tracker type 14:16
+NewTracker function 18:20
+Tracker::Update function 22:24

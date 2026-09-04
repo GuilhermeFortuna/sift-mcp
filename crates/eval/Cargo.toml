@@ -1,0 +1,29 @@
+[package]
+name = "eval"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+storage = { path = "../storage" }
+indexing = { path = "../indexing" }
+retrieval = { path = "../retrieval" }
+inference = { path = "../inference" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+gix = { workspace = true }
+thiserror = { workspace = true }
+similar = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[[example]]
+name = "mine"
+
+[[example]]
+name = "evaluate"
+
+[[example]]
+name = "proxy_kpi"

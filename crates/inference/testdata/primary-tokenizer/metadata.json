@@ -1,0 +1,14 @@
+{
+  "model_id": "Qwen/Qwen3-Embedding-0.6B@97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+  "revision": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+  "dims": 1024,
+  "max_sequence_length": 512,
+  "pooling": "last_token",
+  "normalize": "l2",
+  "query_prefix": "Instruct: Given a code search query, retrieve relevant code passages that answer the query\nQuery: ",
+  "document_prefix": null,
+  "opset": 18,
+  "precision": "fp16",
+  "onnx_sha256": "9556f2cf5057086c8f2f8a8117ed643a35c39cdaccdc33505dc56cc2c7e2c5ce",
+  "tokenizer_sha256": "af0be2f4c61a660bbf9ccd5d8abcd18c27cef18aa68c669996b839ddc8639809"
+}

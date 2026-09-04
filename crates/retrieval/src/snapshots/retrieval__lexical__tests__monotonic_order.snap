@@ -1,0 +1,12 @@
+---
+source: crates/retrieval/src/lexical.rs
+expression: "index.search(\"monotonic order\", 4).unwrap()"
+---
+[
+    ScoredRow {
+        row: RowId(
+            2,
+        ),
+        score: 23.206722,
+    },
+]

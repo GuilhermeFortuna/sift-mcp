@@ -1,0 +1,15 @@
+---
+source: crates/mcp-client/tests/mcp_tools.rs
+expression: value
+---
+{
+  "body": "pub fn alpha() { let x = 1; }",
+  "file": "src/lib.rs",
+  "language": "rust",
+  "lines": [
+    1,
+    1
+  ],
+  "signature": "pub fn alpha() { let x = 1; }",
+  "symbol": "alpha"
+}

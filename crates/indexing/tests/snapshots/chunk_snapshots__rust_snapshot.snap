@@ -1,0 +1,15 @@
+---
+source: crates/indexing/tests/chunk_snapshots.rs
+assertion_line: 54
+expression: "snapshot_lines(\"sample.rs\", Language::Rust, source)"
+---
+free_function function 1:5
+documented function 7:10
+Tracker struct 12:14
+Tracker impl 16:24
+Tracker::new function 17:19
+Tracker::update function 21:23
+nested module 26:28
+nested::inner function 27:27
+tests module 30:36
+tests::it_works function 32:35

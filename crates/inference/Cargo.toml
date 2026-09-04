@@ -1,0 +1,26 @@
+[package]
+name = "inference"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[features]
+default = []
+cuda = ["dep:ort", "dep:cudarc"]
+
+[dependencies]
+half = { workspace = true }
+cudarc = { workspace = true, optional = true }
+ort = { workspace = true, optional = true, features = ["cuda", "half"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokenizers = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[[example]]
+name = "bench_embed"
+required-features = ["cuda"]
