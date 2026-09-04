@@ -390,6 +390,7 @@ async fn dispatch_request(
             Ok(stage)
         }
         Request::SearchSimilar { code, top_k } => {
+            let delay = *state.search_delay.lock();
             let _permit = state
                 .search_sem
                 .acquire()
@@ -416,10 +417,21 @@ async fn dispatch_request(
                 }
             };
             let resp = match target {
-                Target::Frozen(f) => f
-                    .search_similar(&code, top_k, &fusion)
-                    .map(Response::Search)?,
+                Target::Frozen(f) => tokio::task::spawn_blocking(move || {
+                    if let Some(d) = delay {
+                        std::thread::sleep(d);
+                    }
+                    f.search_similar(&code, top_k, &fusion)
+                        .map(Response::Search)
+                })
+                .await
+                .map_err(|e| DaemonError::Internal {
+                    detail: format!("join: {e}"),
+                })??,
                 Target::Ready(ready) => tokio::task::spawn_blocking(move || {
+                    if let Some(d) = delay {
+                        std::thread::sleep(d);
+                    }
                     ready
                         .search_similar(&code, top_k, &fusion)
                         .map(Response::Search)

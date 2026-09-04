@@ -353,7 +353,12 @@ fn freeze_search(
         .map_err(|e| DaemonError::Internal {
             detail: format!("get_many: {e}"),
         })?;
-    let body_list = lexical
+    let frozen_lexical = lexical
+        .frozen_search_handle()
+        .map_err(|e| DaemonError::Internal {
+            detail: format!("frozen lexical reader: {e}"),
+        })?;
+    let body_list = frozen_lexical
         .bodies(&live_rows)
         .map_err(|e| DaemonError::Internal {
             detail: format!("bodies: {e}"),
@@ -371,7 +376,7 @@ fn freeze_search(
     }
     Ok(FrozenSearch {
         dense,
-        lexical: lexical.search_handle(),
+        lexical: frozen_lexical,
         records,
         bodies,
         model_id: embedder.model_id().to_owned(),

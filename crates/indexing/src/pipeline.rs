@@ -1,6 +1,6 @@
 //! End-to-end repository indexing: walk, parse, embed, store.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -237,9 +237,6 @@ enum ParsedFile {
         chunks: Vec<(ChunkRecord, String)>,
     },
     Unparsed,
-    SkipIdentical {
-        reused: u64,
-    },
 }
 
 struct WorkItem {
@@ -569,6 +566,10 @@ impl<'a> Indexer<'a> {
         &self,
         report: &mut IndexReport,
     ) -> Result<(Vec<WorkItem>, HashSet<String>), IndexError> {
+        if matches!(self.config.dirty_worktree, DirtyPolicy::IndexCommitOnly) {
+            return self.collect_head_files(report);
+        }
+
         let mut work = Vec::new();
         let mut present_files = HashSet::new();
         let mut stack = vec![self.repo.clone()];
@@ -632,6 +633,22 @@ impl<'a> Indexer<'a> {
         Ok((work, present_files))
     }
 
+    fn collect_head_files(
+        &self,
+        report: &mut IndexReport,
+    ) -> Result<(Vec<WorkItem>, HashSet<String>), IndexError> {
+        let mut work = Vec::new();
+        let mut present_files = HashSet::new();
+        for rel in self.git.head_files()? {
+            report.files_seen += 1;
+            if let Some(item) = self.work_item_for_path(&rel, report)? {
+                present_files.insert(item.rel.clone());
+                work.push(item);
+            }
+        }
+        Ok((work, present_files))
+    }
+
     fn reconcile_absent_files(
         &mut self,
         present_files: &HashSet<String>,
@@ -681,13 +698,13 @@ impl<'a> Indexer<'a> {
             self.config.parse_threads
         };
 
-        let mut existing: HashMap<String, HashMap<ContentHash, Vec<RowId>>> = HashMap::new();
+        let mut existing: HashMap<String, HashMap<ContentHash, VecDeque<RowId>>> = HashMap::new();
         for item in &work {
             let rows = self.store.rows_for_file(&item.rel)?;
-            let mut map: HashMap<ContentHash, Vec<RowId>> = HashMap::new();
+            let mut map: HashMap<ContentHash, VecDeque<RowId>> = HashMap::new();
             for row in rows {
                 if let Some(rec) = self.store.get(row)? {
-                    map.entry(rec.content_hash).or_default().push(row);
+                    map.entry(rec.content_hash).or_default().push_back(row);
                 }
             }
             existing.insert(item.rel.clone(), map);
@@ -703,7 +720,6 @@ impl<'a> Indexer<'a> {
         let total = work.len() as u64;
         progress.phase(Phase::Parsing, 0, Some(total));
 
-        let existing_for_parse = existing.clone();
         let mut consume_err: Option<IndexError> = None;
         std::thread::scope(|scope| {
             scope.spawn(|| {
@@ -723,22 +739,6 @@ impl<'a> Indexer<'a> {
 
                         if !file.diagnostics.is_empty() && file.chunks.is_empty() {
                             let _ = tx.send(ParsedFile::Unparsed);
-                            return;
-                        }
-
-                        let mut new_counts: HashMap<ContentHash, usize> = HashMap::new();
-                        for chunk in &file.chunks {
-                            *new_counts.entry(chunk.record.content_hash).or_default() += 1;
-                        }
-                        let old_counts: HashMap<ContentHash, usize> = existing_for_parse
-                            .get(&item.rel)
-                            .map(|m| m.iter().map(|(hash, rows)| (*hash, rows.len())).collect())
-                            .unwrap_or_default();
-
-                        if new_counts == old_counts {
-                            let _ = tx.send(ParsedFile::SkipIdentical {
-                                reused: file.chunks.len() as u64,
-                            });
                             return;
                         }
 
@@ -764,10 +764,6 @@ impl<'a> Indexer<'a> {
                 match parsed {
                     ParsedFile::Unparsed => {
                         report.files_unparsed += 1;
-                    }
-                    ParsedFile::SkipIdentical { reused } => {
-                        report.files_indexed += 1;
-                        report.chunks_reused += reused;
                     }
                     ParsedFile::Ok { rel, chunks } => {
                         report.files_indexed += 1;
@@ -811,8 +807,12 @@ impl<'a> Indexer<'a> {
                             report.chunks_removed += to_tombstone.len() as u64;
                         }
 
+                        let mut updates = Vec::new();
                         for (rec, body) in chunks {
-                            if old.get_mut(&rec.content_hash).and_then(Vec::pop).is_some() {
+                            if let Some(row) =
+                                old.get_mut(&rec.content_hash).and_then(VecDeque::pop_front)
+                            {
+                                updates.push((row, rec));
                                 report.chunks_reused += 1;
                                 continue;
                             }
@@ -823,6 +823,12 @@ impl<'a> Indexer<'a> {
                                 consume_err = Some(e);
                                 break;
                             }
+                        }
+                        if consume_err.is_none()
+                            && !updates.is_empty()
+                            && let Err(e) = self.store.update_records(&updates)
+                        {
+                            consume_err = Some(e.into());
                         }
                         if consume_err.is_some() {
                             break;

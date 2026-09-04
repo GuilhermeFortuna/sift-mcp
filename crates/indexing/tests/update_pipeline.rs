@@ -168,6 +168,33 @@ fn full_index_tombstones_files_missing_from_the_walk() {
 }
 
 #[test]
+fn commit_only_full_index_keeps_head_files_deleted_from_worktree() {
+    let h = Harness::new(&[CommitSpec::new("init")
+        .file("keep.rs", sample_fn("keep"))
+        .file("hidden.rs", sample_fn("hidden"))]);
+    let mut indexer = h.indexer(IndexConfig {
+        dirty_worktree: DirtyPolicy::IndexCommitOnly,
+        compact_threshold: 1.0,
+        ..IndexConfig::default()
+    });
+    indexer.index_all(&mut NullProgress).unwrap();
+    let before = indexer.store().stats().unwrap().live;
+
+    std::fs::remove_file(h.repo.path().join("hidden.rs")).unwrap();
+    let report = indexer.index_all(&mut NullProgress).unwrap();
+
+    assert_eq!(report.chunks_removed, 0, "{report:?}");
+    assert_eq!(indexer.store().stats().unwrap().live, before);
+    assert!(
+        !indexer
+            .store()
+            .rows_for_file("hidden.rs")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn update_reorder_reembeds_nothing() {
     // Trailing sentinel keeps neither function at EOF so tree-sitter ranges
     // (and therefore content hashes) stay stable across reorder.
@@ -208,6 +235,16 @@ pub fn aaa() {
     let report = indexer.update(&mut NullProgress).unwrap();
     assert_eq!(report.embeddings_computed, 0, "{report:?}");
     assert_eq!(indexer.store().stats().unwrap().live, live);
+    let locations = indexer
+        .store()
+        .rows_for_file("ab.rs")
+        .unwrap()
+        .into_iter()
+        .filter_map(|row| indexer.store().get(row).unwrap())
+        .map(|record| (record.symbol, [record.line_start, record.line_end]))
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(locations["aaa"], [5, 7]);
+    assert_eq!(locations["bbb"], [1, 3]);
 }
 
 #[test]

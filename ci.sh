@@ -16,6 +16,9 @@ export CARGO_BUILD_JOBS RUST_TEST_THREADS
 export CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG
 
 cargo fmt --all -- --check
+cargo check -p daemon --features cuda --bin sift-daemon
+cargo check -p eval --features cuda --example evaluate
+cargo check -p eval --features cuda --example proxy_kpi
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --workspace --release

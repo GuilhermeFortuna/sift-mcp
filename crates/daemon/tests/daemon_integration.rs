@@ -525,6 +525,66 @@ async fn search_during_index_stays_consistent() {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn search_similar_during_index_does_not_block_runtime() {
+    let h = Harness::new();
+    let daemon = h.start().await;
+    *daemon.state.index_phase_delay.lock() = Some(Duration::from_millis(300));
+    *daemon.state.search_delay.lock() = Some(Duration::from_millis(200));
+    let socket = h.socket.clone();
+    tokio::spawn(async move {
+        let _ = daemon.serve().await;
+    });
+    wait_ready(&socket).await;
+
+    let index_socket = socket.clone();
+    let repo_dir = h.repo.path().to_path_buf();
+    let indexer = tokio::spawn(async move {
+        let mut client = DaemonClient::connect(&index_socket).await.unwrap();
+        let stream = client
+            .request_streaming(Request::Index {
+                mode: IndexMode::Full,
+                repo_dir,
+            })
+            .await
+            .unwrap();
+        futures::pin_mut!(stream);
+        while stream.next().await.is_some() {}
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let similar_socket = socket.clone();
+    let similar = tokio::spawn(async move {
+        let mut client = DaemonClient::connect(&similar_socket).await.unwrap();
+        client
+            .request(Request::SearchSimilar {
+                code: "pub fn alpha() {}".into(),
+                top_k: 3,
+            })
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(
+        !similar.is_finished(),
+        "the delayed similar search should still be running"
+    );
+
+    let status_started = Instant::now();
+    let mut status_client = DaemonClient::connect(&socket).await.unwrap();
+    let status = tokio::time::timeout(
+        Duration::from_millis(100),
+        status_client.request(Request::Status),
+    )
+    .await
+    .expect("status should not wait for similar search")
+    .unwrap();
+    assert!(matches!(status, Response::Status(_)));
+    assert!(status_started.elapsed() < Duration::from_millis(100));
+
+    assert!(matches!(similar.await.unwrap(), Ok(Response::Search(_))));
+    let _ = indexer.await;
+}
+
 #[tokio::test]
 async fn second_index_returns_in_progress() {
     let h = Harness::new();

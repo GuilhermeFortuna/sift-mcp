@@ -6,7 +6,7 @@
 
 use std::env;
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use eval::{
@@ -76,6 +76,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     let dense = DenseIndex::from_store(&store, DenseBackend::Cuda)?;
     let searcher = Searcher::new(&lexical, &dense, &store, &embedder);
 
+    let mined_repo = (set_name == "mined").then(|| {
+        repo.clone()
+            .unwrap_or_else(|| eval::expand_home(eval::MINED_CORPUS_DEFAULT_PATH))
+    });
     let labels = match set_name.as_str() {
         "handwritten" => load_handwritten(&default_handwritten_path())?,
         "docstring" => {
@@ -83,11 +87,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             mine_docstrings(repo_path, &store)?.0
         }
         "mined" => {
-            let repo_path = repo
-                .clone()
-                .unwrap_or_else(|| eval::expand_home(eval::MINED_CORPUS_DEFAULT_PATH));
+            let repo_path = mined_repo.as_ref().expect("mined repo path is resolved");
             mine_commits(
-                &repo_path,
+                repo_path,
                 &store,
                 &MiningConfig {
                     enforce_pinned_revision: true,
@@ -105,7 +107,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         vec![Ablation::Fused]
     };
 
-    let repo_commit = repo
+    let repo_commit = manifest_repo(&set_name, repo.as_deref())
         .as_ref()
         .and_then(|r| RepoGit::open(r).ok()?.head_commit().ok())
         .unwrap_or_default();
@@ -153,4 +155,27 @@ fn chrono_like_now() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{secs}")
+}
+
+fn manifest_repo(set_name: &str, repo: Option<&Path>) -> Option<PathBuf> {
+    match set_name {
+        "mined" => Some(
+            repo.map(Path::to_path_buf)
+                .unwrap_or_else(|| eval::expand_home(eval::MINED_CORPUS_DEFAULT_PATH)),
+        ),
+        _ => repo.map(Path::to_path_buf),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::manifest_repo;
+
+    #[test]
+    fn default_mined_manifest_uses_the_default_corpus_path() {
+        assert_eq!(
+            manifest_repo("mined", None),
+            Some(eval::expand_home(eval::MINED_CORPUS_DEFAULT_PATH))
+        );
+    }
 }

@@ -387,6 +387,37 @@ impl ChunkStore {
         Ok(())
     }
 
+    /// Refresh metadata for existing live rows without changing their matrix positions.
+    pub fn update_records(&mut self, records: &[(RowId, ChunkRecord)]) -> Result<(), StoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE chunks
+                 SET repository = ?1, file = ?2, language = ?3, symbol = ?4,
+                     symbol_type = ?5, signature = ?6, doc_first_line = ?7,
+                     line_start = ?8, line_end = ?9, content_hash = ?10
+                 WHERE rowid = ?11 AND live = 1",
+            )?;
+            for (row, record) in records {
+                stmt.execute(params![
+                    record.repository,
+                    record.file,
+                    record.language,
+                    record.symbol,
+                    record.symbol_type,
+                    record.signature,
+                    record.doc_first_line,
+                    record.line_start as i64,
+                    record.line_end as i64,
+                    record.content_hash.as_bytes().as_slice(),
+                    row.get() as i64,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Rewrite the `file` path on every live row for `from` to `to`.
     /// Used for pure renames so content hashes (and embeddings) stay put.
     pub fn rekey_file(&mut self, from: &str, to: &str) -> Result<u64, StoreError> {
