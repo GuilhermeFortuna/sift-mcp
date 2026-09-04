@@ -14,23 +14,22 @@ pub const HARNESS_VERSION: u32 = 1;
 pub const MINED_CORPUS_DEFAULT_PATH: &str = "~/llama.cpp";
 
 /// Pinned `llama.cpp` revision. Mining refuses any other HEAD.
-pub const MINED_CORPUS_PINNED_REVISION: &str =
-    "c589f0ed10c643678c4707dd160c21ac7633ebc0";
+pub const MINED_CORPUS_PINNED_REVISION: &str = "c589f0ed10c643678c4707dd160c21ac7633ebc0";
 
 /// First-party repository used for docstring and hand-written label sets.
 pub const FIRST_PARTY_CORPUS_DEFAULT_PATH: &str = "~/projects/job-engine";
 
 /// Expand `~` in a path string.
 pub fn expand_home(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
     }
-    if path == "~" {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home);
-        }
+    if path == "~"
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home);
     }
     PathBuf::from(path)
 }
@@ -92,7 +91,10 @@ mod tests {
             "error must name actual HEAD {actual}: {msg}"
         );
         match err {
-            EvalError::RevisionMismatch { expected, actual: a } => {
+            EvalError::RevisionMismatch {
+                expected,
+                actual: a,
+            } => {
                 assert_eq!(expected, MINED_CORPUS_PINNED_REVISION);
                 assert_eq!(a, actual);
             }

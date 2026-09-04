@@ -6,9 +6,7 @@ use retrieval::{FusionConfig, Searcher};
 use serde::{Deserialize, Serialize};
 
 use crate::error::EvalError;
-use crate::metrics::{
-    BytesBeforeHit, Metrics, percentile, reciprocal_rank, top_k_accuracy,
-};
+use crate::metrics::{BytesBeforeHit, Metrics, percentile, reciprocal_rank, top_k_accuracy};
 use crate::mine::{Label, LabelSource};
 use storage::ChunkStore;
 
@@ -234,7 +232,10 @@ fn breakdown_by_source(
         if subset.is_empty() {
             continue;
         }
-        map.insert(source, run_ablation(searcher, &subset, ablation, discarded)?);
+        map.insert(
+            source,
+            run_ablation(searcher, &subset, ablation, discarded)?,
+        );
     }
     Ok(map)
 }
@@ -246,7 +247,11 @@ fn breakdown_by_length(
     discarded: u64,
 ) -> Result<BTreeMap<LengthBucket, Metrics>, EvalError> {
     let mut map = BTreeMap::new();
-    for bucket in [LengthBucket::Short, LengthBucket::Medium, LengthBucket::Long] {
+    for bucket in [
+        LengthBucket::Short,
+        LengthBucket::Medium,
+        LengthBucket::Long,
+    ] {
         let subset: Vec<_> = labels
             .iter()
             .filter(|l| LengthBucket::from_query(&l.query) == bucket)
@@ -255,7 +260,10 @@ fn breakdown_by_length(
         if subset.is_empty() {
             continue;
         }
-        map.insert(bucket, run_ablation(searcher, &subset, ablation, discarded)?);
+        map.insert(
+            bucket,
+            run_ablation(searcher, &subset, ablation, discarded)?,
+        );
     }
     Ok(map)
 }
@@ -314,10 +322,8 @@ mod tests {
         let store_dir = TempDir::new().unwrap();
         let embedder = MockEmbedder::new(DIMS);
         {
-            let store =
-                ChunkStore::create(store_dir.path(), DIMS, embedder.model_id()).unwrap();
-            let mut indexer =
-                Indexer::open(store, &embedder, p, IndexConfig::default()).unwrap();
+            let store = ChunkStore::create(store_dir.path(), DIMS, embedder.model_id()).unwrap();
+            let mut indexer = Indexer::open(store, &embedder, p, IndexConfig::default()).unwrap();
             indexer.index_all(&mut NullProgress).unwrap();
         }
         let store = ChunkStore::open(store_dir.path()).unwrap();
@@ -354,14 +360,7 @@ mod tests {
             label_set: "mined".into(),
             timestamp: "now".into(),
         };
-        let run = evaluate(
-            &searcher,
-            &store,
-            &labels,
-            &[Ablation::Fused],
-            manifest,
-        )
-        .unwrap();
+        let run = evaluate(&searcher, &store, &labels, &[Ablation::Fused], manifest).unwrap();
         let m = &run.per_ablation[&Ablation::Fused];
         assert_eq!(m.labels_scored, 1);
         assert_eq!(m.labels_discarded, 1);
@@ -405,10 +404,8 @@ mod tests {
         let store_dir = TempDir::new().unwrap();
         let embedder = MockEmbedder::new(DIMS);
         {
-            let store =
-                ChunkStore::create(store_dir.path(), DIMS, embedder.model_id()).unwrap();
-            let mut indexer =
-                Indexer::open(store, &embedder, p, IndexConfig::default()).unwrap();
+            let store = ChunkStore::create(store_dir.path(), DIMS, embedder.model_id()).unwrap();
+            let mut indexer = Indexer::open(store, &embedder, p, IndexConfig::default()).unwrap();
             indexer.index_all(&mut NullProgress).unwrap();
         }
         let store = ChunkStore::open(store_dir.path()).unwrap();
@@ -422,11 +419,7 @@ mod tests {
             source: LabelSource::CommitSubject,
             provenance: "1".into(),
         }];
-        let ablations = [
-            Ablation::LexicalOnly,
-            Ablation::DenseOnly,
-            Ablation::Fused,
-        ];
+        let ablations = [Ablation::LexicalOnly, Ablation::DenseOnly, Ablation::Fused];
         let manifest = RunManifest {
             repo_commit: "test".into(),
             indexed_commit: store.indexed_commit().unwrap().unwrap_or_default(),
@@ -477,10 +470,8 @@ mod tests {
         let store_dir = TempDir::new().unwrap();
         let embedder = MockEmbedder::new(DIMS);
         {
-            let store =
-                ChunkStore::create(store_dir.path(), DIMS, embedder.model_id()).unwrap();
-            let mut indexer =
-                Indexer::open(store, &embedder, p, IndexConfig::default()).unwrap();
+            let store = ChunkStore::create(store_dir.path(), DIMS, embedder.model_id()).unwrap();
+            let mut indexer = Indexer::open(store, &embedder, p, IndexConfig::default()).unwrap();
             indexer.index_all(&mut NullProgress).unwrap();
         }
         let store = ChunkStore::open(store_dir.path()).unwrap();
@@ -517,23 +508,13 @@ mod tests {
             label_set: "mixed".into(),
             timestamp: "now".into(),
         };
-        let run = evaluate(
-            &searcher,
-            &store,
-            &labels,
-            &[Ablation::Fused],
-            manifest,
-        )
-        .unwrap();
+        let run = evaluate(&searcher, &store, &labels, &[Ablation::Fused], manifest).unwrap();
 
         let source_sum: u64 = run.by_source.values().map(|m| m.labels_scored).sum();
         let length_sum: u64 = run.by_query_length.values().map(|m| m.labels_scored).sum();
         assert_eq!(source_sum, 3);
         assert_eq!(length_sum, 3);
-        assert_eq!(
-            run.by_source[&LabelSource::CommitSubject].labels_scored,
-            2
-        );
+        assert_eq!(run.by_source[&LabelSource::CommitSubject].labels_scored, 2);
         assert_eq!(run.by_source[&LabelSource::Docstring].labels_scored, 1);
     }
 

@@ -119,9 +119,7 @@ pub fn mine_commits(
     }
 
     let repo = gix::open(repo_path).map_err(|e| EvalError::Git(e.to_string()))?;
-    let tip = repo
-        .head_id()
-        .map_err(|e| EvalError::Git(e.to_string()))?;
+    let tip = repo.head_id().map_err(|e| EvalError::Git(e.to_string()))?;
 
     let indexed = indexed_symbol_set(store)?;
     let mut chunker = Chunker::new().map_err(|e| EvalError::Index(e.to_string()))?;
@@ -140,10 +138,10 @@ pub fn mine_commits(
 
     for info in walk {
         let info = info.map_err(|e| EvalError::Git(e.to_string()))?;
-        if let Some(max) = config.max_commits {
-            if report.commits_examined >= max as u64 {
-                break;
-            }
+        if let Some(max) = config.max_commits
+            && report.commits_examined >= max as u64
+        {
+            break;
         }
         report.commits_examined += 1;
 
@@ -478,9 +476,7 @@ fn touched_symbols(
     parent: Option<&gix::Commit<'_>>,
     chunker: &mut Chunker,
 ) -> Result<Vec<(String, String)>, EvalError> {
-    let new_tree = commit
-        .tree()
-        .map_err(|e| EvalError::Git(e.to_string()))?;
+    let new_tree = commit.tree().map_err(|e| EvalError::Git(e.to_string()))?;
     let old_tree = match parent {
         Some(p) => Some(p.tree().map_err(|e| EvalError::Git(e.to_string()))?),
         None => None,
@@ -708,7 +704,13 @@ mod tests {
         git(p, &["checkout", "main"]);
         git(
             p,
-            &["merge", "--no-ff", "-m", "Merge branch side into main", "side"],
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "Merge branch side into main",
+                "side",
+            ],
         );
 
         write(p, "many.rs", &multi_fns(&["s1", "s2", "s3", "s4", "s5"]));
@@ -859,9 +861,7 @@ mod tests {
         git(p, &["config", "commit.gpgsign", "false"]);
 
         const PHRASE: &str = "UNIQUE_DOCSTRING_PHRASE_XYZ_HOLD_OUT";
-        let src = format!(
-            "/// {PHRASE}\npub fn documented_helper() {{\n    let x = 1;\n}}\n"
-        );
+        let src = format!("/// {PHRASE}\npub fn documented_helper() {{\n    let x = 1;\n}}\n");
         write(p, "doc.rs", &src);
         commit(p, "Add documented helper with unique phrase");
 
@@ -870,7 +870,9 @@ mod tests {
         assert!(
             labels.iter().any(|l| {
                 l.query.contains(PHRASE)
-                    && l.expected.iter().any(|(f, s)| f == "doc.rs" && s == "documented_helper")
+                    && l.expected
+                        .iter()
+                        .any(|(f, s)| f == "doc.rs" && s == "documented_helper")
             }),
             "expected docstring label, got {labels:?}"
         );

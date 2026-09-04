@@ -24,12 +24,18 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn Error>> {
     let mut args = env::args().skip(1);
-    let repo = PathBuf::from(args.next().ok_or("usage: proxy_kpi <repo-path> <store-path>")?);
-    let store_path =
-        PathBuf::from(args.next().ok_or("usage: proxy_kpi <repo-path> <store-path>")?);
+    let repo = PathBuf::from(
+        args.next()
+            .ok_or("usage: proxy_kpi <repo-path> <store-path>")?,
+    );
+    let store_path = PathBuf::from(
+        args.next()
+            .ok_or("usage: proxy_kpi <repo-path> <store-path>")?,
+    );
 
     let store = ChunkStore::open(&store_path)?;
-    let embedder = MockEmbedder::new(store.matrix().dims()).with_model_id(store.matrix().model_id());
+    let embedder =
+        MockEmbedder::new(store.matrix().dims()).with_model_id(store.matrix().model_id());
     let lexical = LexicalIndex::open(store.dir())?;
     let dense = DenseIndex::from_store(&store, DenseBackend::Cpu)?;
     let searcher = Searcher::new(&lexical, &dense, &store, &embedder);

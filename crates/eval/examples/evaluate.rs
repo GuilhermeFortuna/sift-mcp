@@ -39,10 +39,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             "--ablations" => {}
             "--set" => {
                 i += 1;
-                set_name = args
-                    .get(i)
-                    .cloned()
-                    .ok_or("missing value for --set")?;
+                set_name = args.get(i).cloned().ok_or("missing value for --set")?;
             }
             "--repo" => {
                 i += 1;
@@ -64,7 +61,8 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let store_path = store_path.ok_or("usage: evaluate <store-path> [--ablations] [--set …]")?;
     let store = ChunkStore::open(&store_path)?;
-    let embedder = MockEmbedder::new(store.matrix().dims()).with_model_id(store.matrix().model_id());
+    let embedder =
+        MockEmbedder::new(store.matrix().dims()).with_model_id(store.matrix().model_id());
     let lexical = LexicalIndex::open(store.dir())?;
     let dense = DenseIndex::from_store(&store, DenseBackend::Cpu)?;
     let searcher = Searcher::new(&lexical, &dense, &store, &embedder);
@@ -72,9 +70,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let labels = match set_name.as_str() {
         "handwritten" => load_handwritten(&default_handwritten_path())?,
         "docstring" => {
-            let repo_path = repo
-                .as_ref()
-                .ok_or("--set docstring requires --repo")?;
+            let repo_path = repo.as_ref().ok_or("--set docstring requires --repo")?;
             mine_docstrings(repo_path, &store)?.0
         }
         "mined" => {
@@ -118,10 +114,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let run = evaluate(&searcher, &store, &labels, &ablations, manifest)?;
 
     let mut out = serde_json::Map::new();
-    out.insert(
-        "manifest".into(),
-        serde_json::to_value(&run.manifest)?,
-    );
+    out.insert("manifest".into(), serde_json::to_value(&run.manifest)?);
     let mut abl = serde_json::Map::new();
     for (k, m) in &run.per_ablation {
         abl.insert(

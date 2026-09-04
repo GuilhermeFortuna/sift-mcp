@@ -75,17 +75,20 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-        "labels": labels.iter().map(|l| serde_json::json!({
-            "query": l.query,
-            "expected": l.expected,
-            "provenance": l.provenance,
-        })).collect::<Vec<_>>(),
-        "report": {
-            "commits_examined": mining_report.commits_examined,
-            "labels_accepted": mining_report.labels_accepted,
-            "rejected": mining_report.rejected,
-        }
-    }))?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "labels": labels.iter().map(|l| serde_json::json!({
+                "query": l.query,
+                "expected": l.expected,
+                "provenance": l.provenance,
+            })).collect::<Vec<_>>(),
+            "report": {
+                "commits_examined": mining_report.commits_examined,
+                "labels_accepted": mining_report.labels_accepted,
+                "rejected": mining_report.rejected,
+            }
+        }))?
+    );
     Ok(())
 }

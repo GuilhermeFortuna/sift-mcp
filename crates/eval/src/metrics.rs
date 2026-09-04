@@ -17,22 +17,12 @@ pub struct Metrics {
     pub bytes_before_hit: BytesBeforeHit,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct BytesBeforeHit {
     pub mcp_median: u64,
     /// Grep-style baseline over the same repository.
     pub baseline_median: u64,
     pub baseline_command: String,
-}
-
-impl Default for BytesBeforeHit {
-    fn default() -> Self {
-        Self {
-            mcp_median: 0,
-            baseline_median: 0,
-            baseline_command: String::new(),
-        }
-    }
 }
 
 /// Nearest-rank on sorted samples, so a reported percentile means one thing.
@@ -144,11 +134,7 @@ mod tests {
 
     #[test]
     fn reciprocal_rank_first_of_two_expected_determines_rank() {
-        let ranked = vec![
-            pair("a.rs", "a"),
-            pair("b.rs", "b"),
-            pair("c.rs", "c"),
-        ];
+        let ranked = vec![pair("a.rs", "a"), pair("b.rs", "b"), pair("c.rs", "c")];
         // "c" at rank 3 and "b" at rank 2 — first expected to appear is "b" → 0.5
         let expected = vec![pair("c.rs", "c"), pair("b.rs", "b")];
         assert_eq!(reciprocal_rank(&ranked, &expected), 0.5);

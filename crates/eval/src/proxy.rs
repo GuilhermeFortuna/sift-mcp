@@ -8,8 +8,8 @@ use serde_json::json;
 
 use crate::error::EvalError;
 use crate::metrics::BytesBeforeHit;
-use crate::mine::Label;
 use crate::metrics::percentile;
+use crate::mine::Label;
 
 /// Default keyword baseline an agent already has.
 pub const BASELINE_COMMAND: &str = "rg --files-with-matches -F";
@@ -60,10 +60,7 @@ pub fn median_bytes_before_hit(
     })
 }
 
-fn mcp_bytes_to_first_hit(
-    response: &SearchResponse,
-    expected: &[(String, String)],
-) -> u64 {
+fn mcp_bytes_to_first_hit(response: &SearchResponse, expected: &[(String, String)]) -> u64 {
     let mut total = 0u64;
     for result in &response.results {
         let serialized = json!({
@@ -136,7 +133,7 @@ fn fallback_walk_bytes(
     cmd: &str,
 ) -> Result<(u64, String), EvalError> {
     let mut files = Vec::new();
-    fn walk(dir: &Path, repo: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -144,14 +141,14 @@ fn fallback_walk_bytes(
                 continue;
             }
             if path.is_dir() {
-                walk(&path, repo, out)?;
+                walk(&path, out)?;
             } else {
                 out.push(path);
             }
         }
         Ok(())
     }
-    walk(repo, repo, &mut files)?;
+    walk(repo, &mut files)?;
     files.sort();
     let mut total = 0u64;
     for path in files {

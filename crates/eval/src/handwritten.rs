@@ -52,7 +52,11 @@ mod tests {
             "expected ~30 sanity questions, got {}",
             handwritten.len()
         );
-        assert!(handwritten.iter().all(|l| l.provenance.starts_with("handwritten:")));
+        assert!(
+            handwritten
+                .iter()
+                .all(|l| l.provenance.starts_with("handwritten:"))
+        );
 
         // Mining a tiny fixture must not produce handwritten provenance.
         let dir = TempDir::new().unwrap();
@@ -92,10 +96,8 @@ mod tests {
         let store_dir = TempDir::new().unwrap();
         let embedder = MockEmbedder::new(8);
         {
-            let store =
-                ChunkStore::create(store_dir.path(), 8, embedder.model_id()).unwrap();
-            let mut indexer =
-                Indexer::open(store, &embedder, p, IndexConfig::default()).unwrap();
+            let store = ChunkStore::create(store_dir.path(), 8, embedder.model_id()).unwrap();
+            let mut indexer = Indexer::open(store, &embedder, p, IndexConfig::default()).unwrap();
             indexer.index_all(&mut NullProgress).unwrap();
         }
         let store = ChunkStore::open(store_dir.path()).unwrap();
@@ -109,7 +111,9 @@ mod tests {
         )
         .unwrap();
         assert!(
-            mined.iter().all(|l| !l.provenance.starts_with("handwritten:")),
+            mined
+                .iter()
+                .all(|l| !l.provenance.starts_with("handwritten:")),
             "mined set must never include handwritten labels"
         );
     }
