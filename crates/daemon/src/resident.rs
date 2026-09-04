@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,7 @@ use retrieval::result::preview_from_body;
 use retrieval::{SearchDiagnostics, SearchResponse, SearchResult, Searcher, StageTimings};
 use storage::{ChunkRecord, ChunkStore, Integrity, RowId, SCHEMA_VERSION};
 
+use crate::observe::EventRing;
 use crate::protocol::{
     DaemonError, DaemonStatus, IndexReportWire, LastIndexCompletion, Lifecycle, ResourceSnapshot,
     Response,
@@ -149,6 +150,9 @@ pub struct SharedState {
     pub instance_id: String,
     pub current_progress: ParkingMutex<Option<crate::protocol::IndexProgressSnapshot>>,
     pub last_index: ParkingMutex<Option<LastIndexCompletion>>,
+    pub event_ring: ParkingMutex<EventRing>,
+    pub next_connection_id: AtomicU64,
+    pub record_events: AtomicBool,
 }
 
 impl SharedState {
@@ -176,7 +180,40 @@ impl SharedState {
             instance_id: new_instance_id(),
             current_progress: ParkingMutex::new(None),
             last_index: ParkingMutex::new(None),
+            event_ring: ParkingMutex::new(EventRing::default()),
+            next_connection_id: AtomicU64::new(1),
+            record_events: AtomicBool::new(true),
         })
+    }
+
+    pub fn alloc_connection_id(&self) -> u64 {
+        self.next_connection_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub fn record_terminal(
+        &self,
+        draft: crate::observe::TerminalEventDraft,
+        elapsed: Duration,
+    ) {
+        if !self.record_events.load(Ordering::Relaxed) {
+            return;
+        }
+        let event = crate::protocol::RequestEvent {
+            cursor: crate::protocol::EventCursor {
+                instance_id: self.instance_id.clone(),
+                sequence: 0,
+            },
+            connection_id: draft.connection_id,
+            request_id: draft.request_id,
+            completed_at_unix_ms: Self::observed_at_unix_ms(),
+            operation: draft.operation.to_owned(),
+            elapsed_micros: elapsed.as_micros() as u64,
+            outcome: draft.outcome.to_owned(),
+            error_code: draft.error_code,
+            result_count: draft.result_count,
+            stage_millis: draft.stage_millis,
+        };
+        self.event_ring.lock().push(event);
     }
 
     pub fn touch(&self) {

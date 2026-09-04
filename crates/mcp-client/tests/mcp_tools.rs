@@ -74,6 +74,7 @@ impl Harness {
             idle_timeout: Duration::from_secs(60),
             max_concurrent_searches: 4,
             fusion: FusionConfig::default(),
+            record_events: true,
         }
     }
 

@@ -76,6 +76,7 @@ impl Harness {
             idle_timeout: Duration::from_secs(60),
             max_concurrent_searches: 4,
             fusion: FusionConfig::default(),
+            record_events: true,
         }
     }
 
@@ -792,6 +793,7 @@ async fn gpu_unavailable_is_typed() {
         idle_timeout: Duration::from_secs(60),
         max_concurrent_searches: 4,
         fusion: FusionConfig::default(),
+        record_events: true,
     };
     let daemon = Daemon::bind(config, boom as Arc<dyn Embedder>)
         .await
@@ -987,5 +989,133 @@ async fn incomplete_handshake_times_out_without_blocking_idle() {
     assert!(
         finished.is_ok(),
         "provisional incomplete handshake must not block idle exit"
+    );
+}
+
+#[tokio::test]
+async fn request_events_capture_distinct_identities_and_privacy() {
+    let h = Harness::new();
+    let daemon = h.start().await;
+    let socket = h.socket.clone();
+    tokio::spawn(async move {
+        let _ = daemon.serve().await;
+    });
+    wait_ready(&socket).await;
+
+    let secret_query = "SECRET_QUERY_SHOULD_NOT_APPEAR";
+    let secret_path = "secret_path_should_not_appear.rs";
+
+    let mut a = DaemonClient::connect(&socket).await.unwrap();
+    let mut b = DaemonClient::connect(&socket).await.unwrap();
+
+    // Both reuse request_id 2 for the first post-Hello request (next_id starts at 1 for Hello).
+    let ok = a
+        .request(Request::Search {
+            query: secret_query.into(),
+            top_k: 3,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(ok, Response::Search(_)));
+
+    let err = b
+        .request(Request::GetSymbol {
+            file: secret_path.into(),
+            symbol: "nope".into(),
+        })
+        .await;
+    assert!(matches!(err, Err(DaemonError::SymbolNotFound { .. })));
+
+    let mut obs = DaemonClient::connect_observer(&socket).await.unwrap();
+    let observation = obs.observe(None).await.unwrap();
+    assert!(
+        observation.events.len() >= 2,
+        "expected terminal events, got {}",
+        observation.events.len()
+    );
+
+    let search_ev = observation
+        .events
+        .iter()
+        .find(|e| e.operation == "Search" && e.outcome == "ok")
+        .expect("search event");
+    let symbol_ev = observation
+        .events
+        .iter()
+        .find(|e| e.operation == "GetSymbol" && e.outcome == "error")
+        .expect("symbol error event");
+
+    assert_eq!(search_ev.request_id, 2);
+    assert_eq!(symbol_ev.request_id, 2);
+    assert_ne!(
+        search_ev.connection_id, symbol_ev.connection_id,
+        "distinct connections"
+    );
+    assert_ne!(
+        search_ev.cursor.sequence, symbol_ev.cursor.sequence,
+        "distinct sequences"
+    );
+    assert_eq!(symbol_ev.error_code.as_deref(), Some("symbol_not_found"));
+
+    let blob = format!("{observation:?}");
+    assert!(
+        !blob.contains(secret_query),
+        "query must not appear in diagnostics"
+    );
+    assert!(
+        !blob.contains(secret_path),
+        "path must not appear in diagnostics"
+    );
+}
+
+#[tokio::test]
+async fn index_progress_visible_to_observer_before_client_delivery() {
+    let h = Harness::new();
+    let daemon = h.start().await;
+    *daemon.state.index_phase_delay.lock() = Some(Duration::from_millis(50));
+    let socket = h.socket.clone();
+    tokio::spawn(async move {
+        let _ = daemon.serve().await;
+    });
+    wait_ready(&socket).await;
+
+    let s = socket.clone();
+    let repo = h.repo.path().to_path_buf();
+    let indexer = tokio::spawn(async move {
+        let mut c = DaemonClient::connect(&s).await.unwrap();
+        c.request(Request::Index {
+            mode: IndexMode::Update,
+            repo_dir: repo,
+        })
+        .await
+    });
+
+    let mut saw_progress = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Ok(mut obs) = DaemonClient::connect_observer(&socket).await
+            && let Ok(observation) = obs.observe(None).await
+            && (observation.status.current_progress.is_some()
+                || observation.status.lifecycle == daemon::Lifecycle::Indexing
+                || observation.events.iter().any(|e| e.operation == "Index"))
+        {
+            saw_progress = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let index_res = indexer.await.unwrap();
+    assert!(index_res.is_ok(), "{index_res:?}");
+    assert!(saw_progress, "observer should see indexing activity");
+
+    let mut obs = DaemonClient::connect_observer(&socket).await.unwrap();
+    let observation = obs.observe(None).await.unwrap();
+    assert!(
+        observation.status.last_index.is_some(),
+        "last index completion should be retained"
+    );
+    assert_eq!(
+        observation.status.last_index.as_ref().unwrap().outcome,
+        "ok"
     );
 }

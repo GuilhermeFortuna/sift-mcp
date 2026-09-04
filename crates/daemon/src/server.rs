@@ -37,6 +37,8 @@ pub struct DaemonConfig {
     pub idle_timeout: Duration,
     pub max_concurrent_searches: usize,
     pub fusion: FusionConfig,
+    /// When false, status/observe still work but terminal events are not recorded.
+    pub record_events: bool,
 }
 
 impl DaemonConfig {
@@ -54,6 +56,7 @@ impl DaemonConfig {
             idle_timeout: Duration::from_secs(15 * 60),
             max_concurrent_searches: 4,
             fusion: FusionConfig::default(),
+            record_events: true,
         })
     }
 }
@@ -106,6 +109,9 @@ impl Daemon {
             config.max_concurrent_searches,
             config.idle_timeout,
         );
+        state
+            .record_events
+            .store(config.record_events, std::sync::atomic::Ordering::Relaxed);
 
         Ok(BindOutcome::Bound(Box::new(Daemon {
             config,
@@ -312,6 +318,7 @@ async fn handle_connection(
     };
 
     let role = hello_ok.role;
+    let connection_id = state.alloc_connection_id();
     if role == ClientRole::Worker {
         *state.connected_clients.lock() += 1;
         state.touch();
@@ -361,7 +368,8 @@ async fn handle_connection(
             }
         }
 
-        let outcome = dispatch_request(&env.payload, &state, &mut writer, request_id).await;
+        let outcome =
+            dispatch_request(&env.payload, &state, &mut writer, request_id, connection_id).await;
         match outcome {
             Ok(stage) => log_request(request_id, req_type, "ok", stage),
             Err(e) => {
@@ -399,6 +407,7 @@ async fn dispatch_request(
     state: &Arc<SharedState>,
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     request_id: u64,
+    connection_id: u64,
 ) -> Result<Option<String>, DaemonError> {
     match req {
         Request::Hello { .. } => Err(DaemonError::Malformed {
@@ -413,6 +422,7 @@ async fn dispatch_request(
             Ok(None)
         }
         Request::Search { query, top_k } => {
+            let started = std::time::Instant::now();
             let delay = *state.search_delay.lock();
             let _permit = state
                 .search_sem
@@ -431,44 +441,103 @@ async fn dispatch_request(
             let target = {
                 let guard = state.serving.read().unwrap();
                 match &*guard {
-                    ServingState::Starting => return Err(DaemonError::Starting),
+                    ServingState::Starting => {
+                        let err = DaemonError::Starting;
+                        state.record_terminal(
+                            crate::observe::TerminalEventDraft {
+                                connection_id,
+                                request_id,
+                                operation: "Search",
+                                outcome: "error",
+                                error_code: Some(crate::observe::safe_error_code(&err)),
+                                result_count: None,
+                                stage_millis: None,
+                            },
+                            started.elapsed(),
+                        );
+                        return Err(err);
+                    }
                     ServingState::Stale(r) => {
-                        return Err(DaemonError::StoreStale { reason: r.clone() });
+                        let err = DaemonError::StoreStale { reason: r.clone() };
+                        state.record_terminal(
+                            crate::observe::TerminalEventDraft {
+                                connection_id,
+                                request_id,
+                                operation: "Search",
+                                outcome: "error",
+                                error_code: Some(crate::observe::safe_error_code(&err)),
+                                result_count: None,
+                                stage_millis: None,
+                            },
+                            started.elapsed(),
+                        );
+                        return Err(err);
                     }
                     ServingState::Ready(r) => Target::Ready(Arc::clone(&r.search)),
                     ServingState::Indexing(f) => Target::Frozen(Arc::clone(f)),
                 }
             };
-            let resp = match target {
+            let result = match target {
                 Target::Frozen(f) => tokio::task::spawn_blocking(move || {
                     if let Some(d) = delay {
                         std::thread::sleep(d);
                     }
-                    f.search(&query, top_k, &fusion).map(Response::Search)
+                    f.search(&query, top_k, &fusion)
                 })
                 .await
                 .map_err(|e| DaemonError::Internal {
                     detail: format!("join: {e}"),
-                })??,
+                })?,
                 Target::Ready(ready) => tokio::task::spawn_blocking(move || {
                     if let Some(d) = delay {
                         std::thread::sleep(d);
                     }
-                    ready.search(&query, top_k, &fusion).map(Response::Search)
+                    ready.search(&query, top_k, &fusion)
                 })
                 .await
                 .map_err(|e| DaemonError::Internal {
                     detail: format!("join: {e}"),
-                })??,
+                })?,
             };
-            let stage = match &resp {
-                Response::Search(s) => Some(format!("{:?}", s.diagnostics.stage_millis)),
-                _ => None,
-            };
-            write_response(writer, request_id, resp).await?;
-            Ok(stage)
+            match result {
+                Ok(search) => {
+                    let stage = Some(format!("{:?}", search.diagnostics.stage_millis));
+                    let count = search.results.len() as u64;
+                    let timings = search.diagnostics.stage_millis.clone();
+                    state.record_terminal(
+                        crate::observe::TerminalEventDraft {
+                            connection_id,
+                            request_id,
+                            operation: "Search",
+                            outcome: "ok",
+                            error_code: None,
+                            result_count: Some(count),
+                            stage_millis: Some(timings),
+                        },
+                        started.elapsed(),
+                    );
+                    write_response(writer, request_id, Response::Search(search)).await?;
+                    Ok(stage)
+                }
+                Err(e) => {
+                    state.record_terminal(
+                        crate::observe::TerminalEventDraft {
+                            connection_id,
+                            request_id,
+                            operation: "Search",
+                            outcome: "error",
+                            error_code: Some(crate::observe::safe_error_code(&e)),
+                            result_count: None,
+                            stage_millis: None,
+                        },
+                        started.elapsed(),
+                    );
+                    Err(e)
+                }
+            }
         }
         Request::SearchSimilar { code, top_k } => {
+            let started = std::time::Instant::now();
             let delay = *state.search_delay.lock();
             let _permit = state
                 .search_sem
@@ -487,43 +556,103 @@ async fn dispatch_request(
             let target = {
                 let guard = state.serving.read().unwrap();
                 match &*guard {
-                    ServingState::Starting => return Err(DaemonError::Starting),
+                    ServingState::Starting => {
+                        let err = DaemonError::Starting;
+                        state.record_terminal(
+                            crate::observe::TerminalEventDraft {
+                                connection_id,
+                                request_id,
+                                operation: "SearchSimilar",
+                                outcome: "error",
+                                error_code: Some(crate::observe::safe_error_code(&err)),
+                                result_count: None,
+                                stage_millis: None,
+                            },
+                            started.elapsed(),
+                        );
+                        return Err(err);
+                    }
                     ServingState::Stale(r) => {
-                        return Err(DaemonError::StoreStale { reason: r.clone() });
+                        let err = DaemonError::StoreStale { reason: r.clone() };
+                        state.record_terminal(
+                            crate::observe::TerminalEventDraft {
+                                connection_id,
+                                request_id,
+                                operation: "SearchSimilar",
+                                outcome: "error",
+                                error_code: Some(crate::observe::safe_error_code(&err)),
+                                result_count: None,
+                                stage_millis: None,
+                            },
+                            started.elapsed(),
+                        );
+                        return Err(err);
                     }
                     ServingState::Ready(r) => Target::Ready(Arc::clone(&r.search)),
                     ServingState::Indexing(f) => Target::Frozen(Arc::clone(f)),
                 }
             };
-            let resp = match target {
+            let result = match target {
                 Target::Frozen(f) => tokio::task::spawn_blocking(move || {
                     if let Some(d) = delay {
                         std::thread::sleep(d);
                     }
                     f.search_similar(&code, top_k, &fusion)
-                        .map(Response::Search)
                 })
                 .await
                 .map_err(|e| DaemonError::Internal {
                     detail: format!("join: {e}"),
-                })??,
+                })?,
                 Target::Ready(ready) => tokio::task::spawn_blocking(move || {
                     if let Some(d) = delay {
                         std::thread::sleep(d);
                     }
-                    ready
-                        .search_similar(&code, top_k, &fusion)
-                        .map(Response::Search)
+                    ready.search_similar(&code, top_k, &fusion)
                 })
                 .await
                 .map_err(|e| DaemonError::Internal {
                     detail: format!("join: {e}"),
-                })??,
+                })?,
             };
-            write_response(writer, request_id, resp).await?;
-            Ok(None)
+            match result {
+                Ok(search) => {
+                    let stage = Some(format!("{:?}", search.diagnostics.stage_millis));
+                    let count = search.results.len() as u64;
+                    let timings = search.diagnostics.stage_millis.clone();
+                    state.record_terminal(
+                        crate::observe::TerminalEventDraft {
+                            connection_id,
+                            request_id,
+                            operation: "SearchSimilar",
+                            outcome: "ok",
+                            error_code: None,
+                            result_count: Some(count),
+                            stage_millis: Some(timings),
+                        },
+                        started.elapsed(),
+                    );
+                    write_response(writer, request_id, Response::Search(search)).await?;
+                    Ok(stage)
+                }
+                Err(e) => {
+                    state.record_terminal(
+                        crate::observe::TerminalEventDraft {
+                            connection_id,
+                            request_id,
+                            operation: "SearchSimilar",
+                            outcome: "error",
+                            error_code: Some(crate::observe::safe_error_code(&e)),
+                            result_count: None,
+                            stage_millis: None,
+                        },
+                        started.elapsed(),
+                    );
+                    Err(e)
+                }
+            }
         }
         Request::GetSymbol { file, symbol } => {
+            let started = std::time::Instant::now();
             let file = file.clone();
             let symbol = symbol.clone();
             enum Target {
@@ -533,34 +662,107 @@ async fn dispatch_request(
             let target = {
                 let guard = state.serving.read().unwrap();
                 match &*guard {
-                    ServingState::Starting => return Err(DaemonError::Starting),
+                    ServingState::Starting => {
+                        let err = DaemonError::Starting;
+                        state.record_terminal(
+                            crate::observe::TerminalEventDraft {
+                                connection_id,
+                                request_id,
+                                operation: "GetSymbol",
+                                outcome: "error",
+                                error_code: Some(crate::observe::safe_error_code(&err)),
+                                result_count: None,
+                                stage_millis: None,
+                            },
+                            started.elapsed(),
+                        );
+                        return Err(err);
+                    }
                     ServingState::Stale(r) => {
-                        return Err(DaemonError::StoreStale { reason: r.clone() });
+                        let err = DaemonError::StoreStale { reason: r.clone() };
+                        state.record_terminal(
+                            crate::observe::TerminalEventDraft {
+                                connection_id,
+                                request_id,
+                                operation: "GetSymbol",
+                                outcome: "error",
+                                error_code: Some(crate::observe::safe_error_code(&err)),
+                                result_count: None,
+                                stage_millis: None,
+                            },
+                            started.elapsed(),
+                        );
+                        return Err(err);
                     }
                     ServingState::Ready(r) => Target::Ready(Arc::clone(&r.search)),
                     ServingState::Indexing(f) => Target::Frozen(Arc::clone(f)),
                 }
             };
-            let resp = match target {
-                Target::Frozen(f) => f.get_symbol(&file, &symbol)?,
+            let result = match target {
+                Target::Frozen(f) => f.get_symbol(&file, &symbol),
                 Target::Ready(ready) => {
                     tokio::task::spawn_blocking(move || ready.get_symbol(&file, &symbol))
                         .await
                         .map_err(|e| DaemonError::Internal {
                             detail: format!("join: {e}"),
-                        })??
+                        })?
                 }
             };
-            write_response(writer, request_id, resp).await?;
-            Ok(None)
+            match result {
+                Ok(resp) => {
+                    state.record_terminal(
+                        crate::observe::TerminalEventDraft {
+                            connection_id,
+                            request_id,
+                            operation: "GetSymbol",
+                            outcome: "ok",
+                            error_code: None,
+                            result_count: Some(1),
+                            stage_millis: None,
+                        },
+                        started.elapsed(),
+                    );
+                    write_response(writer, request_id, resp).await?;
+                    Ok(None)
+                }
+                Err(e) => {
+                    state.record_terminal(
+                        crate::observe::TerminalEventDraft {
+                            connection_id,
+                            request_id,
+                            operation: "GetSymbol",
+                            outcome: "error",
+                            error_code: Some(crate::observe::safe_error_code(&e)),
+                            result_count: None,
+                            stage_millis: None,
+                        },
+                        started.elapsed(),
+                    );
+                    Err(e)
+                }
+            }
         }
         Request::Index { mode, repo_dir } => {
+            let started = std::time::Instant::now();
             if state
                 .indexing
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                 .is_err()
             {
-                return Err(DaemonError::IndexInProgress);
+                let err = DaemonError::IndexInProgress;
+                state.record_terminal(
+                    crate::observe::TerminalEventDraft {
+                        connection_id,
+                        request_id,
+                        operation: "Index",
+                        outcome: "error",
+                        error_code: Some(crate::observe::safe_error_code(&err)),
+                        result_count: None,
+                        stage_millis: None,
+                    },
+                    started.elapsed(),
+                );
+                return Err(err);
             }
             let delay = *state.index_phase_delay.lock();
             let full = matches!(mode, IndexMode::Full);
@@ -656,6 +858,13 @@ async fn dispatch_request(
             let final_res = loop {
                 tokio::select! {
                     Some((phase, done, total)) = progress_rx.recv() => {
+                        *state.current_progress.lock() = Some(crate::protocol::IndexProgressSnapshot {
+                            phase: crate::protocol::IndexPhase::from(phase),
+                            done,
+                            total,
+                            connection_id,
+                            request_id,
+                        });
                         write_response(writer, request_id, Response::IndexProgress {
                             phase: crate::protocol::IndexPhase::from(phase),
                             done,
@@ -669,30 +878,78 @@ async fn dispatch_request(
                     }
                 }
             };
+            *state.current_progress.lock() = None;
             match final_res {
                 Ok(report) => {
+                    let wire = crate::protocol::IndexReportWire::from(&report);
+                    *state.last_index.lock() = Some(crate::protocol::LastIndexCompletion {
+                        completed_at_unix_ms: SharedState::observed_at_unix_ms(),
+                        outcome: "ok".into(),
+                        error_code: None,
+                        connection_id,
+                        request_id,
+                        report: Some(wire),
+                    });
+                    state.record_terminal(
+                        crate::observe::TerminalEventDraft {
+                            connection_id,
+                            request_id,
+                            operation: "Index",
+                            outcome: "ok",
+                            error_code: None,
+                            result_count: Some(report.chunks_added),
+                            stage_millis: None,
+                        },
+                        started.elapsed(),
+                    );
                     write_response(writer, request_id, index_report_response(&report)).await?;
                     Ok(None)
                 }
-                Err(e) => Err(e),
+                Err(e) => {
+                    *state.last_index.lock() = Some(crate::protocol::LastIndexCompletion {
+                        completed_at_unix_ms: SharedState::observed_at_unix_ms(),
+                        outcome: "error".into(),
+                        error_code: Some(crate::observe::safe_error_code(&e)),
+                        connection_id,
+                        request_id,
+                        report: None,
+                    });
+                    state.record_terminal(
+                        crate::observe::TerminalEventDraft {
+                            connection_id,
+                            request_id,
+                            operation: "Index",
+                            outcome: "error",
+                            error_code: Some(crate::observe::safe_error_code(&e)),
+                            result_count: None,
+                            stage_millis: None,
+                        },
+                        started.elapsed(),
+                    );
+                    Err(e)
+                }
             }
         }
         Request::Observe { after } => {
             let status = state.status();
-            let next_cursor = crate::protocol::EventCursor {
-                instance_id: state.instance_id.clone(),
-                sequence: after.as_ref().map(|c| c.sequence).unwrap_or(0),
+            let mut obs = {
+                let ring = state.event_ring.lock();
+                crate::observe::build_observation(status, &ring, after.as_ref())
             };
-            let gap = after
-                .as_ref()
-                .is_some_and(|c| c.instance_id != state.instance_id);
-            let obs = crate::protocol::Observation {
-                status,
-                events: vec![],
-                next_cursor,
-                gap,
-                more: false,
-            };
+            while encode(&Envelope {
+                request_id,
+                payload: Response::Observation(obs.clone()),
+            })
+            .map(|b| b.len() > crate::protocol::MAX_REQUEST_BYTES + 4)
+            .unwrap_or(true)
+                && !obs.events.is_empty()
+            {
+                obs.events.pop();
+                obs.more = true;
+                if let Some(last) = obs.events.last() {
+                    obs.next_cursor = last.cursor.clone();
+                }
+            }
             write_response(writer, request_id, Response::Observation(obs)).await?;
             Ok(None)
         }

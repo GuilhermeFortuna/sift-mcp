@@ -76,6 +76,7 @@ async fn main() {
         idle_timeout: Duration::from_secs(idle_secs),
         max_concurrent_searches: 4,
         fusion: FusionConfig::default(),
+        record_events: true,
     };
 
     let daemon = match Daemon::bind(config, embedder).await {
