@@ -1,0 +1,36 @@
+---
+source: crates/mcp-client/tests/mcp_tools.rs
+expression: value
+---
+{
+  "diagnostics": {
+    "dense_error": null,
+    "dense_ok": true,
+    "lexical_error": null,
+    "lexical_ok": true,
+    "stage_millis": {
+      "assemble": 0,
+      "dense": 0,
+      "embed": 0,
+      "fuse": 0,
+      "lexical": 0,
+      "total": 0
+    }
+  },
+  "results": [
+    {
+      "dense_score": -0.44522998,
+      "doc": null,
+      "file": "src/lib.rs",
+      "fused_score": 0.032786883,
+      "lexical_score": 2.301457,
+      "lines": [
+        1,
+        1
+      ],
+      "preview": "pub fn alpha() { let x = 1; }",
+      "signature": "pub fn alpha() { let x = 1; }",
+      "symbol": "alpha"
+    }
+  ]
+}

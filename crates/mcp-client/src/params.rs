@@ -1,5 +1,6 @@
 //! Typed MCP tool parameters and bound-checking.
 
+use schemars::JsonSchema;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -28,7 +29,7 @@ fn default_full() -> bool {
     false
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SearchCodeParams {
     pub query: String,
     #[serde(default = "default_top_k")]
@@ -49,7 +50,7 @@ impl Validate for SearchCodeParams {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct FindSimilarCodeParams {
     pub code: String,
     #[serde(default = "default_top_k")]
@@ -70,7 +71,7 @@ impl Validate for FindSimilarCodeParams {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct GetSymbolParams {
     pub file: String,
     pub symbol: String,
@@ -88,7 +89,7 @@ impl Validate for GetSymbolParams {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct IndexRepositoryParams {
     pub path: String,
     #[serde(default = "default_full")]

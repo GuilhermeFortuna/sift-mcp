@@ -2184,6 +2184,7 @@ checksum = "86f0f8fee8c926415c58d6ae43a08523a26faccb2323f5e6b644fe7dd4ef6b82"
 dependencies = [
  "console 0.16.4",
  "once_cell",
+ "serde",
  "similar",
  "tempfile",
 ]
@@ -2479,9 +2480,17 @@ name = "mcp-client"
 version = "0.1.0"
 dependencies = [
  "daemon",
+ "futures",
+ "indexing",
+ "inference",
+ "insta",
+ "retrieval",
  "rmcp",
+ "schemars",
  "serde",
  "serde_json",
+ "storage",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "toml",
@@ -3163,6 +3172,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tracing",
  "uuid",
@@ -3922,6 +3932,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.4",
+]
+
+[[package]]
+name = "tokio-stream"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3d06f0b082ba57c26b79407372e57cf2a1e28124f78e9479fe80322cf53420b"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]
