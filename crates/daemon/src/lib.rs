@@ -3,6 +3,7 @@
 pub mod client;
 pub mod codec;
 pub mod handshake;
+pub mod measure;
 pub mod observe;
 pub mod paths;
 pub mod protocol;

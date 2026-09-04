@@ -76,7 +76,9 @@ async fn main() {
         idle_timeout: Duration::from_secs(idle_secs),
         max_concurrent_searches: 4,
         fusion: FusionConfig::default(),
-        record_events: true,
+        record_events: std::env::var("SIFT_RECORD_EVENTS")
+            .map(|v| v != "0" && v != "false")
+            .unwrap_or(true),
     };
 
     let daemon = match Daemon::bind(config, embedder).await {

@@ -30,6 +30,7 @@ thiserror = { workspace = true }
 blake3 = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -39,6 +40,7 @@ storage = { path = "../storage" }
 retrieval = { path = "../retrieval", features = ["engine"] }
 futures = { workspace = true }
 tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
 
 [[bin]]
 name = "sift-daemon"
@@ -48,4 +50,8 @@ required-features = ["cuda"]
 [[bin]]
 name = "sift-daemon-test"
 path = "src/bin/sift-daemon-test.rs"
+required-features = ["resident"]
+
+[[example]]
+name = "measure_ui_observability"
 required-features = ["resident"]
