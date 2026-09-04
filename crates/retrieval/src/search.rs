@@ -608,4 +608,43 @@ mod tests {
             "wall {wall_ms} should be under 2*delay"
         );
     }
+
+    #[test]
+    fn metadata_resolved_with_one_get_many_per_search() {
+        let mut fixture = build_fixture();
+        let _ = fixture.store.take_statements_prepared();
+
+        let searcher = Searcher::new(
+            &fixture.lexical,
+            &fixture.dense,
+            &fixture.store,
+            &fixture.embedder,
+        );
+        let config = FusionConfig {
+            lexical_depth: 50,
+            dense_depth: 50,
+            rrf_k: 60.0,
+        };
+        let _ = searcher
+            .search("clamp_decoder_timestamps", 10, &config)
+            .unwrap();
+        let first = fixture.store.take_statements_prepared();
+        assert!(first > 0, "expected get_many to prepare statements");
+
+        let _ = searcher
+            .search("clamp_decoder_timestamps", 3, &config)
+            .unwrap();
+        let second = fixture.store.take_statements_prepared();
+        assert_eq!(
+            first, second,
+            "prepare count must be independent of candidate/result count (one get_many)"
+        );
+
+        // A direct get_many of varying sizes must match the same prepare budget.
+        let _ = fixture.store.take_statements_prepared();
+        let rows: Vec<_> = (0..4).map(storage::RowId::from_u64).collect();
+        fixture.store.get_many(&rows).unwrap();
+        let direct = fixture.store.take_statements_prepared();
+        assert_eq!(first, direct);
+    }
 }
