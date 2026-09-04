@@ -30,7 +30,7 @@ appears only in `tools/`.
 | [SIFT-009](specs/SIFT-009-fusion-and-results-spec.md) / [Plan](plans/SIFT-009-fusion-and-results-plan.md)   | 01    | `DONE`    | SIFT-007, SIFT-008           | One fused ranking from both retrievers, rendered as triage-sufficient result records                             |
 | [SIFT-010](specs/SIFT-010-resident-daemon-spec.md) / [Plan](plans/SIFT-010-resident-daemon-plan.md)         | 01    | `DONE`    | SIFT-006, SIFT-009           | A daemon holding models and indexes resident behind a unix socket, auto-started and idle-evicting                |
 | [SIFT-011](specs/SIFT-011-mcp-tool-surface-spec.md) / [Plan](plans/SIFT-011-mcp-tool-surface-plan.md)       | 01    | `READY`   | SIFT-010                     | The four Phase 1 MCP tools served by a thin stdio client that starts in milliseconds                             |
-| [SIFT-012](specs/SIFT-012-git-mined-eval-spec.md) / [Plan](plans/SIFT-012-git-mined-eval-plan.md)           | 01    | `BLOCKED` | SIFT-006, SIFT-009           | Thousands of retrieval labels mined from a pinned third-party history, and a metrics report over them            |
+| [SIFT-012](specs/SIFT-012-git-mined-eval-spec.md) / [Plan](plans/SIFT-012-git-mined-eval-plan.md)           | 01    | `READY`   | SIFT-006, SIFT-009           | Thousands of retrieval labels mined from a pinned third-party history, and a metrics report over them            |
 | [SIFT-013](specs/SIFT-013-phase-1-acceptance-spec.md) / [Plan](plans/SIFT-013-phase-1-acceptance-plan.md)   | 01    | `BLOCKED` | SIFT-011, SIFT-012           | A measured verdict on the Phase 1 exit criteria, and a locked baseline for Phase 2                               |
 
 
