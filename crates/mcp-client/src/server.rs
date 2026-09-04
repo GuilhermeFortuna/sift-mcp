@@ -333,7 +333,10 @@ impl SiftMcpServer {
             Err(e) => return Ok(to_tool_error(e)),
         };
 
-        let progress_token = ProgressToken(NumberOrString::String("index".into()));
+        let progress_token = ctx
+            .meta
+            .get_progress_token()
+            .unwrap_or_else(|| ProgressToken(NumberOrString::String("index".into())));
         let mut last_report = None;
         while let Some(frame) = stream.next().await {
             match frame {
@@ -345,7 +348,11 @@ impl SiftMcpServer {
                     if let Some(t) = total {
                         param = param.with_total(t as f64);
                     }
-                    let _ = ctx.peer.notify_progress(param).await;
+                    if let Err(e) = ctx.peer.notify_progress(param).await {
+                        return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                            "failed to notify progress: {e}"
+                        ))]));
+                    }
                 }
                 Response::IndexDone(report) => {
                     last_report = Some(report);

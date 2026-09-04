@@ -1,0 +1,23 @@
+---
+source: crates/mcp-client/tests/mcp_tools.rs
+expression: value
+---
+{
+  "chunks_added": 1,
+  "chunks_removed": 0,
+  "chunks_reused": 0,
+  "chunks_truncated": 0,
+  "commit": "<redacted>",
+  "embed_millis": 0,
+  "embeddings_computed": 1,
+  "files_excluded": 0,
+  "files_indexed": 1,
+  "files_seen": 0,
+  "files_unparsed": 0,
+  "files_unsupported": 0,
+  "live_after": 2,
+  "live_before": 1,
+  "parse_millis": 0,
+  "store_millis": 0,
+  "wall_millis": 0
+}

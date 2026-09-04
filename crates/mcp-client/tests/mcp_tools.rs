@@ -225,3 +225,128 @@ async fn search_code_stdio_snapshot() {
     }
     insta::assert_json_snapshot!(value);
 }
+
+#[tokio::test]
+async fn find_similar_code_stdio_snapshot() {
+    let h = Harness::new();
+    h.start_daemon().await;
+    let result = call_tool(
+        h.mcp_server(),
+        "find_similar_code",
+        json!({ "code": "pub fn alpha() { let x = 1; }", "top_k": 5 }),
+    )
+    .await;
+    let text = tool_text(&result);
+    let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    if let Some(obj) = value
+        .get_mut("diagnostics")
+        .and_then(|d| d.get_mut("stage_millis"))
+        .and_then(|s| s.as_object_mut())
+    {
+        for (_k, v) in obj.iter_mut() {
+            *v = json!(0);
+        }
+    }
+    insta::assert_json_snapshot!(value);
+}
+
+#[tokio::test]
+async fn get_symbol_stdio_snapshot() {
+    let h = Harness::new();
+    h.start_daemon().await;
+    let result = call_tool(
+        h.mcp_server(),
+        "get_symbol",
+        json!({ "file": "src/lib.rs", "symbol": "alpha" }),
+    )
+    .await;
+    let text = tool_text(&result);
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    insta::assert_json_snapshot!(value);
+}
+
+#[tokio::test]
+async fn index_repository_streams_progress_then_summary() {
+    let h = Harness::new();
+    h.start_daemon().await;
+
+    // Force index work so progress frames are produced.
+    write_rs(
+        h.repo.path(),
+        "src/beta.rs",
+        "pub fn beta() { let y = 2; }\n",
+    );
+    git_commit(h.repo.path(), "add beta");
+
+    let server = h.mcp_server();
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        let _ = server
+            .serve(server_transport)
+            .await
+            .unwrap()
+            .waiting()
+            .await;
+    });
+
+    let progress = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let client_handler = ProgressClient {
+        progress: Arc::clone(&progress),
+    };
+    let client = client_handler.serve(client_transport).await.unwrap();
+    let mut params = CallToolRequestParams::new("index_repository");
+    let token =
+        rmcp::model::ProgressToken(rmcp::model::NumberOrString::String("test-index".into()));
+    let mut meta = rmcp::model::RequestMetaObject::new();
+    meta.set_progress_token(token);
+    params.meta = Some(meta);
+    params.arguments = json!({
+        "path": h.repo.path().to_string_lossy(),
+        "full": false
+    })
+    .as_object()
+    .cloned();
+    let result = client.call_tool(params).await.unwrap();
+    let _ = client.cancel().await;
+    let text = tool_text(&result);
+    let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    if let Some(obj) = value.as_object_mut() {
+        for key in [
+            "commit",
+            "parse_millis",
+            "embed_millis",
+            "store_millis",
+            "wall_millis",
+        ] {
+            if let Some(v) = obj.get_mut(key) {
+                if v.is_string() {
+                    *v = json!("<redacted>");
+                } else {
+                    *v = json!(0);
+                }
+            }
+        }
+    }
+    let msgs = progress.lock().unwrap().clone();
+    assert!(
+        !msgs.is_empty(),
+        "expected MCP progress notifications before summary, got none; result={text}"
+    );
+    insta::assert_json_snapshot!(value);
+}
+
+#[derive(Clone)]
+struct ProgressClient {
+    progress: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl ClientHandler for ProgressClient {
+    async fn on_progress(
+        &self,
+        params: rmcp::model::ProgressNotificationParam,
+        _context: rmcp::service::NotificationContext<rmcp::RoleClient>,
+    ) {
+        let msg = params.message.unwrap_or_default();
+        self.progress.lock().unwrap().push(msg);
+    }
+}
