@@ -34,9 +34,7 @@ impl Harness {
         let mut perms = std::fs::metadata(runtime.path()).unwrap().permissions();
         perms.set_mode(0o700);
         std::fs::set_permissions(runtime.path(), perms).unwrap();
-        unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
-        }
+        // Explicit per-test socket — avoid XDG_RUNTIME_DIR (races under parallel tests).
         let store_dir = TempDir::new().unwrap();
         let repo = TempDir::new().unwrap();
         init_git_repo(repo.path());
@@ -57,7 +55,7 @@ impl Harness {
         drop(lexical);
         drop(store);
 
-        let socket = daemon::paths::socket_path_for_store(store_dir.path()).unwrap();
+        let socket = runtime.path().join("daemon.sock");
         Self {
             _runtime: runtime,
             store_dir,
@@ -285,14 +283,21 @@ async fn get_symbol_absent_is_actionable() {
 #[tokio::test]
 async fn cold_start_spawns_daemon_and_searches() {
     let h = Harness::new();
-    // Build path to sift-daemon from CARGO_BIN_EXE if available, else target/debug.
+    let runtime = TempDir::new().unwrap();
+    let mut perms = std::fs::metadata(runtime.path()).unwrap().permissions();
+    perms.set_mode(0o700);
+    std::fs::set_permissions(runtime.path(), perms).unwrap();
+    // SAFETY: spawn path derives the socket from XDG_RUNTIME_DIR; isolate this test.
+    unsafe {
+        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+    }
+
     let bin = std::env::var_os("CARGO_BIN_EXE_sift-daemon")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/sift-daemon")
         });
     if !bin.exists() {
-        // Compile the binary for this test when missing from the default target dir.
         let status = std::process::Command::new("cargo")
             .args(["build", "-p", "daemon", "--bin", "sift-daemon"])
             .status()
