@@ -2,6 +2,7 @@
 
 pub mod corpus;
 pub mod error;
+pub mod handwritten;
 pub mod metrics;
 pub mod mine;
 pub mod proxy;
@@ -12,6 +13,7 @@ pub use corpus::{
     MINED_CORPUS_PINNED_REVISION, expand_home, require_mined_revision,
 };
 pub use error::EvalError;
+pub use handwritten::{default_handwritten_path, load_handwritten};
 pub use metrics::{BytesBeforeHit, Metrics, percentile, reciprocal_rank, top_k_accuracy};
 pub use mine::{
     Label, LabelSource, MiningConfig, MiningReport, RejectReason, build_held_out_index,

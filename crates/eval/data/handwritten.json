@@ -1,0 +1,122 @@
+[
+  {
+    "query": "Where is the FastAPI application constructed?",
+    "expected": [["apps/api/src/job_engine/main.py", "create_app"]]
+  },
+  {
+    "query": "How do we sync all enabled job sources?",
+    "expected": [["apps/api/src/job_engine/sync.py", "sync_all_sources"]]
+  },
+  {
+    "query": "Where is a sync progress line formatted for one source?",
+    "expected": [["apps/api/src/job_engine/sync.py", "format_source_start"]]
+  },
+  {
+    "query": "How is the final sync report rendered as text?",
+    "expected": [["apps/api/src/job_engine/sync.py", "format_sync_report"]]
+  },
+  {
+    "query": "Where do we format a single source sync result?",
+    "expected": [["apps/api/src/job_engine/sync.py", "format_source_result"]]
+  },
+  {
+    "query": "How is an ingestion run summarized as a dictionary?",
+    "expected": [["apps/api/src/job_engine/ingest.py", "ingestion_run_summary"]]
+  },
+  {
+    "query": "Where does source ingestion start for one source id?",
+    "expected": [["apps/api/src/job_engine/ingest.py", "ingest_source"]]
+  },
+  {
+    "query": "What settings class holds API configuration?",
+    "expected": [["apps/api/src/job_engine/config.py", "Settings"]]
+  },
+  {
+    "query": "Which origins are allowed for CORS?",
+    "expected": [["apps/api/src/job_engine/main.py", "_get_allowed_origins"]]
+  },
+  {
+    "query": "What is the health check response model?",
+    "expected": [["apps/api/src/job_engine/main.py", "HealthResponse"]]
+  },
+  {
+    "query": "How do we detect that a source sync failed?",
+    "expected": [["apps/api/src/job_engine/sync.py", "_source_failed"]]
+  },
+  {
+    "query": "Where is a failed source result payload built?",
+    "expected": [["apps/api/src/job_engine/sync.py", "_failed_source_result"]]
+  },
+  {
+    "query": "How do we count a key from a sync summary map?",
+    "expected": [["apps/api/src/job_engine/sync.py", "_count"]]
+  },
+  {
+    "query": "Where is the sync CLI entrypoint?",
+    "expected": [["apps/api/src/job_engine/sync.py", "main"]]
+  },
+  {
+    "query": "What lifespan hook starts the API app?",
+    "expected": [["apps/api/src/job_engine/main.py", "_lifespan"]]
+  },
+  {
+    "query": "How does the runner claim an application run?",
+    "expected": [["apps/api/src/job_engine/services/runner.py", "claim_run"]]
+  },
+  {
+    "query": "Where are job search results ranked?",
+    "expected": [["apps/api/src/job_engine/services/search.py", "search_jobs"]]
+  },
+  {
+    "query": "How is applicant vault data loaded?",
+    "expected": [["apps/api/src/job_engine/services/applicant.py", "get_applicant"]]
+  },
+  {
+    "query": "Where do we normalize a job posting title?",
+    "expected": [["apps/api/src/job_engine/services/normalization.py", "normalize_title"]]
+  },
+  {
+    "query": "How are duplicate postings detected?",
+    "expected": [["apps/api/src/job_engine/services/deduplication.py", "is_duplicate"]]
+  },
+  {
+    "query": "Where is full-auto authorization checked?",
+    "expected": [["apps/api/src/job_engine/services/authorization.py", "authorize_full_auto"]]
+  },
+  {
+    "query": "How does local AI propose a profile change?",
+    "expected": [["apps/api/src/job_engine/services/local_ai.py", "propose_profile"]]
+  },
+  {
+    "query": "Where are application batch rows created?",
+    "expected": [["apps/api/src/job_engine/services/batches.py", "create_batch"]]
+  },
+  {
+    "query": "How are managed assets listed for a profile?",
+    "expected": [["apps/api/src/job_engine/services/managed_assets.py", "list_assets"]]
+  },
+  {
+    "query": "Where do answer providers fill application questions?",
+    "expected": [["apps/api/src/job_engine/services/answers.py", "provide_answer"]]
+  },
+  {
+    "query": "How is catalog job detail fetched?",
+    "expected": [["apps/api/src/job_engine/api/jobs.py", "get_job_detail"]]
+  },
+  {
+    "query": "Where is the jobs search HTTP endpoint?",
+    "expected": [["apps/api/src/job_engine/api/jobs.py", "search_jobs"]]
+  },
+  {
+    "query": "How does the applications API create a run?",
+    "expected": [["apps/api/src/job_engine/api/applications.py", "create_application"]]
+  },
+  {
+    "query": "Where is multi-profile switching handled?",
+    "expected": [["apps/api/src/job_engine/api/profiles.py", "switch_profile"]]
+  },
+  {
+    "query": "How does the sync HTTP trigger kick off ingestion?",
+    "expected": [["apps/api/src/job_engine/api/sync.py", "trigger_sync"]]
+  }
+]

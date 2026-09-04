@@ -18,3 +18,12 @@ similar = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[[example]]
+name = "mine"
+
+[[example]]
+name = "evaluate"
+
+[[example]]
+name = "proxy_kpi"

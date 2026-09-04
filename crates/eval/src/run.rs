@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 use retrieval::{FusionConfig, Searcher};
 use serde::{Deserialize, Serialize};
 
-use crate::corpus::HARNESS_VERSION;
 use crate::error::EvalError;
 use crate::metrics::{
     BytesBeforeHit, Metrics, percentile, reciprocal_rank, top_k_accuracy,
@@ -264,6 +263,7 @@ fn breakdown_by_length(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::corpus::HARNESS_VERSION;
     use crate::mine::{Label, LabelSource};
     use indexing::{IndexConfig, Indexer, NullProgress};
     use inference::{Embedder, MockEmbedder};
