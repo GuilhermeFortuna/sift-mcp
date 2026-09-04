@@ -614,4 +614,21 @@ mod tests {
                 >= 1
         );
     }
+
+    #[test]
+    fn mining_report_reconciles_accepted_plus_rejected() {
+        let repo = build_mining_fixture();
+        let (_dir, store) = index_repo(repo.path());
+        let (_labels, report) = mine_commits(repo.path(), &store, &test_config()).unwrap();
+        let rejected_sum: u64 = report.rejected.values().sum();
+        assert_eq!(
+            report.labels_accepted + rejected_sum,
+            report.commits_examined,
+            "accepted {} + rejected {} != examined {}",
+            report.labels_accepted,
+            rejected_sum,
+            report.commits_examined
+        );
+        assert!(report.reconciles());
+    }
 }
