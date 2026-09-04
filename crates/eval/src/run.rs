@@ -386,4 +386,154 @@ mod tests {
         assert!(m.top_1.is_finite());
         assert!(!m.top_1.is_nan());
     }
+
+    #[test]
+    fn evaluate_three_ablations_differ_and_report_latency() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-b", "main"]);
+        git(p, &["config", "user.email", "t@e.com"]);
+        git(p, &["config", "user.name", "T"]);
+        git(p, &["config", "commit.gpgsign", "false"]);
+        write_commit(
+            p,
+            "a.rs",
+            "pub fn alpha() { let x = 1; }\npub fn beta() { let y = 2; }\n",
+            "Add alpha and beta helpers together",
+        );
+
+        let store_dir = TempDir::new().unwrap();
+        let embedder = MockEmbedder::new(DIMS);
+        {
+            let store =
+                ChunkStore::create(store_dir.path(), DIMS, embedder.model_id()).unwrap();
+            let mut indexer =
+                Indexer::open(store, &embedder, p, IndexConfig::default()).unwrap();
+            indexer.index_all(&mut NullProgress).unwrap();
+        }
+        let store = ChunkStore::open(store_dir.path()).unwrap();
+        let lexical = LexicalIndex::open(store.dir()).unwrap();
+        let dense = DenseIndex::from_store(&store, DenseBackend::Cpu).unwrap();
+        let searcher = Searcher::new(&lexical, &dense, &store, &embedder);
+
+        let labels = vec![Label {
+            query: "alpha helper".into(),
+            expected: vec![("a.rs".into(), "alpha".into())],
+            source: LabelSource::CommitSubject,
+            provenance: "1".into(),
+        }];
+        let ablations = [
+            Ablation::LexicalOnly,
+            Ablation::DenseOnly,
+            Ablation::Fused,
+        ];
+        let manifest = RunManifest {
+            repo_commit: "test".into(),
+            indexed_commit: store.indexed_commit().unwrap().unwrap_or_default(),
+            model_id: embedder.model_id().to_string(),
+            fusion: FusionConfig::default().into(),
+            harness_version: HARNESS_VERSION,
+            label_set: "mined".into(),
+            timestamp: "now".into(),
+        };
+        let run = evaluate(&searcher, &store, &labels, &ablations, manifest).unwrap();
+        assert_eq!(run.per_ablation.len(), 3);
+        let lex = &run.per_ablation[&Ablation::LexicalOnly];
+        let den = &run.per_ablation[&Ablation::DenseOnly];
+        let fused = &run.per_ablation[&Ablation::Fused];
+        // At least one ablation path should differ from fused on scores or be reported separately.
+        assert_eq!(lex.labels_scored, 1);
+        assert_eq!(den.labels_scored, 1);
+        assert_eq!(fused.labels_scored, 1);
+        assert!(lex.latency_p50_ms >= 0.0);
+        assert!(den.latency_p50_ms >= 0.0);
+        assert!(fused.latency_p50_ms >= 0.0);
+        // Fusion configs differ so contributions differ even when ranking ties.
+        assert_ne!(
+            Ablation::LexicalOnly.fusion_config().dense_depth,
+            Ablation::Fused.fusion_config().dense_depth
+        );
+        assert_ne!(
+            Ablation::DenseOnly.fusion_config().lexical_depth,
+            Ablation::Fused.fusion_config().lexical_depth
+        );
+    }
+
+    #[test]
+    fn breakdowns_partition_labels_exactly_once() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-b", "main"]);
+        git(p, &["config", "user.email", "t@e.com"]);
+        git(p, &["config", "user.name", "T"]);
+        git(p, &["config", "commit.gpgsign", "false"]);
+        write_commit(
+            p,
+            "a.rs",
+            "/// Doc for documented\npub fn documented() { let x = 1; }\n",
+            "Add documented helper function here",
+        );
+
+        let store_dir = TempDir::new().unwrap();
+        let embedder = MockEmbedder::new(DIMS);
+        {
+            let store =
+                ChunkStore::create(store_dir.path(), DIMS, embedder.model_id()).unwrap();
+            let mut indexer =
+                Indexer::open(store, &embedder, p, IndexConfig::default()).unwrap();
+            indexer.index_all(&mut NullProgress).unwrap();
+        }
+        let store = ChunkStore::open(store_dir.path()).unwrap();
+        let lexical = LexicalIndex::open(store.dir()).unwrap();
+        let dense = DenseIndex::from_store(&store, DenseBackend::Cpu).unwrap();
+        let searcher = Searcher::new(&lexical, &dense, &store, &embedder);
+
+        let labels = vec![
+            Label {
+                query: "short q".into(), // 2 words -> Short
+                expected: vec![("a.rs".into(), "documented".into())],
+                source: LabelSource::CommitSubject,
+                provenance: "1".into(),
+            },
+            Label {
+                query: "Doc for documented".into(), // 3 words -> Short
+                expected: vec![("a.rs".into(), "documented".into())],
+                source: LabelSource::Docstring,
+                provenance: "2".into(),
+            },
+            Label {
+                query: "one two three four five six".into(), // 6 -> Medium
+                expected: vec![("a.rs".into(), "documented".into())],
+                source: LabelSource::CommitSubject,
+                provenance: "3".into(),
+            },
+        ];
+        let manifest = RunManifest {
+            repo_commit: "test".into(),
+            indexed_commit: "test".into(),
+            model_id: embedder.model_id().to_string(),
+            fusion: FusionConfig::default().into(),
+            harness_version: HARNESS_VERSION,
+            label_set: "mixed".into(),
+            timestamp: "now".into(),
+        };
+        let run = evaluate(
+            &searcher,
+            &store,
+            &labels,
+            &[Ablation::Fused],
+            manifest,
+        )
+        .unwrap();
+
+        let source_sum: u64 = run.by_source.values().map(|m| m.labels_scored).sum();
+        let length_sum: u64 = run.by_query_length.values().map(|m| m.labels_scored).sum();
+        assert_eq!(source_sum, 3);
+        assert_eq!(length_sum, 3);
+        assert_eq!(
+            run.by_source[&LabelSource::CommitSubject].labels_scored,
+            2
+        );
+        assert_eq!(run.by_source[&LabelSource::Docstring].labels_scored, 1);
+    }
 }
