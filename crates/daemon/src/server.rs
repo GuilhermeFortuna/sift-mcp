@@ -542,7 +542,11 @@ async fn dispatch_request(
             let progress_rx = tokio::task::spawn_blocking(move || {
                 let mut frames = Vec::new();
                 while let Ok((phase, done, total)) = progress_rx.recv() {
-                    frames.push(Response::IndexProgress { phase, done, total });
+                    frames.push(Response::IndexProgress {
+                        phase: crate::protocol::IndexPhase::from(phase),
+                        done,
+                        total,
+                    });
                 }
                 let final_res = done_rx.recv().unwrap_or(Err(DaemonError::Internal {
                     detail: "index worker vanished".into(),

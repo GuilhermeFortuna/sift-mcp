@@ -5,14 +5,21 @@ edition.workspace = true
 publish = false
 
 [features]
-default = []
-cuda = ["inference/cuda"]
+default = ["resident"]
+# Full resident daemon (indexes, models, socket server). Off for thin MCP clients.
+resident = [
+  "dep:storage",
+  "dep:indexing",
+  "dep:inference",
+  "retrieval/engine",
+]
+cuda = ["resident", "inference/cuda"]
 
 [dependencies]
-storage = { path = "../storage" }
-indexing = { path = "../indexing" }
-retrieval = { path = "../retrieval" }
-inference = { path = "../inference" }
+storage = { path = "../storage", optional = true }
+indexing = { path = "../indexing", optional = true }
+retrieval = { path = "../retrieval", default-features = false }
+inference = { path = "../inference", optional = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
@@ -29,10 +36,11 @@ tempfile = { workspace = true }
 indexing = { path = "../indexing" }
 inference = { path = "../inference" }
 storage = { path = "../storage" }
-retrieval = { path = "../retrieval" }
+retrieval = { path = "../retrieval", features = ["engine"] }
 futures = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [[bin]]
 name = "sift-daemon"
 path = "src/bin/sift-daemon.rs"
+required-features = ["resident"]

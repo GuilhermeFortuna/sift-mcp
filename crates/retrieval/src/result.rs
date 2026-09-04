@@ -1,4 +1,7 @@
 //! Search result records and preview truncation.
+//!
+//! Wire types in this module compile without the `engine` feature so thin
+//! clients can deserialize search responses without linking tantivy/tokenizers.
 
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +24,32 @@ pub struct SearchResult {
     pub lexical_score: Option<f32>,
     pub dense_score: Option<f32>,
     pub fused_score: f32,
+}
+
+/// Which retrievers ran and which failed. Degradation is data, not a log line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchDiagnostics {
+    pub lexical_ok: bool,
+    pub dense_ok: bool,
+    pub lexical_error: Option<String>,
+    pub dense_error: Option<String>,
+    pub stage_millis: StageTimings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageTimings {
+    pub embed: u64,
+    pub lexical: u64,
+    pub dense: u64,
+    pub fuse: u64,
+    pub assemble: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchResponse {
+    pub results: Vec<SearchResult>,
+    pub diagnostics: SearchDiagnostics,
 }
 
 /// Truncate `body` to at most [`PREVIEW_MAX_BYTES`], ending on a UTF-8 character

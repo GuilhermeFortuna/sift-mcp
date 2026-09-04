@@ -5,16 +5,18 @@ edition.workspace = true
 publish = false
 
 [features]
-default = []
-cuda = ["inference/cuda"]
+default = ["engine"]
+# BM25/dense search engine. Disabled by thin clients that only need wire types.
+engine = ["dep:half", "dep:inference", "dep:storage", "dep:tantivy"]
+cuda = ["engine", "inference/cuda"]
 
 [dependencies]
-half = { workspace = true }
-inference = { path = "../inference" }
+half = { workspace = true, optional = true }
+inference = { path = "../inference", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-storage = { path = "../storage" }
-tantivy = { workspace = true }
+storage = { path = "../storage", optional = true }
+tantivy = { workspace = true, optional = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
@@ -27,6 +29,8 @@ required-features = ["cuda"]
 
 [[example]]
 name = "search"
+required-features = ["engine"]
 
 [[example]]
 name = "bench_search"
+required-features = ["engine"]

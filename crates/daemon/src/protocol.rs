@@ -19,6 +19,29 @@ pub enum IndexMode {
     Update,
 }
 
+/// Wire mirror of indexing phases so thin clients need not depend on `indexing`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IndexPhase {
+    Walking,
+    Parsing,
+    Embedding,
+    Storing,
+    Compacting,
+}
+
+#[cfg(feature = "resident")]
+impl From<indexing::Phase> for IndexPhase {
+    fn from(p: indexing::Phase) -> Self {
+        match p {
+            indexing::Phase::Walking => Self::Walking,
+            indexing::Phase::Parsing => Self::Parsing,
+            indexing::Phase::Embedding => Self::Embedding,
+            indexing::Phase::Storing => Self::Storing,
+            indexing::Phase::Compacting => Self::Compacting,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Request {
     Hello {
@@ -108,7 +131,7 @@ pub enum Response {
         body: String,
     },
     IndexProgress {
-        phase: indexing::Phase,
+        phase: IndexPhase,
         done: u64,
         total: Option<u64>,
     },
@@ -139,6 +162,7 @@ pub struct IndexReportWire {
     pub live_after: u64,
 }
 
+#[cfg(feature = "resident")]
 impl From<&indexing::IndexReport> for IndexReportWire {
     fn from(r: &indexing::IndexReport) -> Self {
         Self {

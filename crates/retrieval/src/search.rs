@@ -4,7 +4,6 @@ use std::time::Instant;
 
 use half::f16;
 use inference::{Embedder, Role};
-use serde::{Deserialize, Serialize};
 use storage::{ChunkStore, RowId};
 
 use crate::RetrievalError;
@@ -12,33 +11,9 @@ use crate::ScoredRow;
 use crate::dense::DenseIndex;
 use crate::fusion::{FusionConfig, fuse};
 use crate::lexical::LexicalIndex;
-use crate::result::{SearchResult, preview_from_body};
-
-/// Which retrievers ran and which failed. Degradation is data, not a log line.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SearchDiagnostics {
-    pub lexical_ok: bool,
-    pub dense_ok: bool,
-    pub lexical_error: Option<String>,
-    pub dense_error: Option<String>,
-    pub stage_millis: StageTimings,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StageTimings {
-    pub embed: u64,
-    pub lexical: u64,
-    pub dense: u64,
-    pub fuse: u64,
-    pub assemble: u64,
-    pub total: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SearchResponse {
-    pub results: Vec<SearchResult>,
-    pub diagnostics: SearchDiagnostics,
-}
+use crate::result::{
+    SearchDiagnostics, SearchResponse, SearchResult, StageTimings, preview_from_body,
+};
 
 pub struct Searcher<'a> {
     lexical: &'a LexicalIndex,
