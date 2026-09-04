@@ -214,6 +214,11 @@ impl Embedder for OnnxEmbedder {
             self.embed_batch(chunk, role)
         })
     }
+
+    fn resource_usage(&self) -> crate::embedder::ResourceUsage {
+        // Device 0 is the configured CUDA device for this embedder.
+        crate::nvml::sample_nvml(0)
+    }
 }
 
 #[cfg(test)]

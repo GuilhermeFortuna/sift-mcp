@@ -153,6 +153,7 @@ pub struct SharedState {
     pub event_ring: ParkingMutex<EventRing>,
     pub next_connection_id: AtomicU64,
     pub record_events: AtomicBool,
+    pub cached_resources: ParkingMutex<(Instant, ResourceSnapshot)>,
 }
 
 impl SharedState {
@@ -183,6 +184,10 @@ impl SharedState {
             event_ring: ParkingMutex::new(EventRing::default()),
             next_connection_id: AtomicU64::new(1),
             record_events: AtomicBool::new(true),
+            cached_resources: ParkingMutex::new((
+                Instant::now() - Duration::from_secs(10),
+                ResourceSnapshot::unavailable(0),
+            )),
         })
     }
 
@@ -223,11 +228,40 @@ impl SharedState {
             .unwrap_or(0)
     }
 
+    pub fn refresh_resources(&self, embedder: &dyn Embedder) {
+        let mut guard = self.cached_resources.lock();
+        if guard.0.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        let sampled_at = Self::observed_at_unix_ms();
+        let usage = embedder.resource_usage();
+        *guard = (
+            Instant::now(),
+            ResourceSnapshot {
+                sampled_at_unix_ms: sampled_at,
+                device_id: usage.device_id,
+                device_used_bytes: usage.device_used_bytes,
+                device_total_bytes: usage.device_total_bytes,
+                process_used_bytes: usage.process_used_bytes,
+                model_used_bytes: usage.model_used_bytes,
+            },
+        );
+    }
+
+    pub fn resources_snapshot(&self) -> ResourceSnapshot {
+        let guard = self.cached_resources.lock();
+        let mut snap = guard.1.clone();
+        if snap.sampled_at_unix_ms == 0 {
+            snap.sampled_at_unix_ms = Self::observed_at_unix_ms();
+        }
+        snap
+    }
+
     pub fn status(&self) -> DaemonStatus {
         let uptime = self.started_at.elapsed().as_secs();
         let idle = self.last_request_at.lock().elapsed().as_secs();
         let observed_at_unix_ms = Self::observed_at_unix_ms();
-        let resources = ResourceSnapshot::unavailable(observed_at_unix_ms);
+        let resources = self.resources_snapshot();
         let current_progress = self.current_progress.lock().clone();
         let last_index = self.last_index.lock().clone();
         let shutting_down = *self.shutting_down.lock();

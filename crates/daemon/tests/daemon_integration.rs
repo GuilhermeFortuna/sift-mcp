@@ -971,6 +971,35 @@ async fn observer_can_connect_when_store_is_stale() {
 }
 
 #[tokio::test]
+async fn cpu_resource_fields_are_unavailable_and_search_still_works() {
+    let h = Harness::new();
+    let daemon = h.start().await;
+    let socket = h.socket.clone();
+    tokio::spawn(async move {
+        let _ = daemon.serve().await;
+    });
+    wait_ready(&socket).await;
+    let mut obs = DaemonClient::connect_observer(&socket).await.unwrap();
+    let observation = obs.observe(None).await.unwrap();
+    let r = &observation.status.resources;
+    assert!(r.device_id.is_none());
+    assert!(r.device_used_bytes.is_none());
+    assert!(r.device_total_bytes.is_none());
+    assert!(r.process_used_bytes.is_none());
+    assert!(r.model_used_bytes.is_none());
+
+    let mut c = DaemonClient::connect(&socket).await.unwrap();
+    let resp = c
+        .request(Request::Search {
+            query: "alpha".into(),
+            top_k: 3,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(resp, Response::Search(_)));
+}
+
+#[tokio::test]
 async fn restart_changes_instance_id() {
     let h = Harness::new();
     let daemon = h.start().await;

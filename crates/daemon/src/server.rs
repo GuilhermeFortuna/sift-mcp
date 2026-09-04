@@ -167,6 +167,7 @@ impl Daemon {
         let mut jobs = JoinSet::new();
         let listener = self.listener;
         let socket_path = self.config.socket_path.clone();
+        let connection_embedder = Arc::clone(&self.embedder);
         let _lock_file = self.lock_file;
 
         loop {
@@ -198,8 +199,9 @@ impl Daemon {
                             }
                             // Provisional: do not count as a worker until Hello classifies.
                             let st = Arc::clone(&state);
+                            let emb = Arc::clone(&connection_embedder);
                             jobs.spawn(async move {
-                                let role = match handle_connection(stream, st.clone()).await {
+                                let role = match handle_connection(stream, st.clone(), emb).await {
                                     Ok(role) => role,
                                     Err(e) => {
                                         warn!(error = ?e, "connection error");
@@ -232,6 +234,7 @@ impl Daemon {
 async fn handle_connection(
     stream: UnixStream,
     state: Arc<SharedState>,
+    embedder: Arc<dyn Embedder>,
 ) -> Result<Option<ClientRole>, DaemonError> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = tokio::io::BufReader::new(reader);
@@ -368,8 +371,15 @@ async fn handle_connection(
             }
         }
 
-        let outcome =
-            dispatch_request(&env.payload, &state, &mut writer, request_id, connection_id).await;
+        let outcome = dispatch_request(
+            &env.payload,
+            &state,
+            &mut writer,
+            request_id,
+            connection_id,
+            embedder.as_ref(),
+        )
+        .await;
         match outcome {
             Ok(stage) => log_request(request_id, req_type, "ok", stage),
             Err(e) => {
@@ -408,12 +418,14 @@ async fn dispatch_request(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     request_id: u64,
     connection_id: u64,
+    embedder: &dyn Embedder,
 ) -> Result<Option<String>, DaemonError> {
     match req {
         Request::Hello { .. } => Err(DaemonError::Malformed {
             detail: "duplicate Hello".into(),
         }),
         Request::Status => {
+            state.refresh_resources(embedder);
             write_response(writer, request_id, Response::Status(state.status())).await?;
             Ok(None)
         }
@@ -931,6 +943,7 @@ async fn dispatch_request(
             }
         }
         Request::Observe { after } => {
+            state.refresh_resources(embedder);
             let status = state.status();
             let mut obs = {
                 let ring = state.event_ring.lock();
