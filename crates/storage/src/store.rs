@@ -3,6 +3,7 @@ use crate::matrix::EmbeddingMatrix;
 use crate::record::{ChunkRecord, ContentHash, RowId};
 use half::f16;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Metadata schema version. Independent of the matrix format version.
@@ -145,6 +146,10 @@ impl ChunkStore {
         let (db_path, matrix_path) = active_paths(dir)?;
         let conn = Connection::open(&db_path)?;
         configure_connection(&conn)?;
+        // Schema v1 originally enforced one live row per content hash. Keep
+        // opening those stores compatible while allowing one row per file
+        // occurrence going forward.
+        conn.execute_batch("DROP INDEX IF EXISTS chunks_live_hash;")?;
         let version: u32 = meta_u32(&conn, "schema_version")?;
         if version != SCHEMA_VERSION {
             return Err(StoreError::SchemaVersion {
@@ -169,8 +174,7 @@ impl ChunkStore {
         }
     }
 
-    /// Atomic batch. Returns one RowId per input, reusing the row of any
-    /// content hash already live.
+    /// Atomic batch. Returns one distinct RowId per input occurrence.
     pub fn insert_batch(
         &mut self,
         chunks: &[(ChunkRecord, Vec<f16>)],
@@ -194,24 +198,8 @@ impl ChunkStore {
         let mut result = Vec::with_capacity(chunks.len());
         let mut new_rows: Vec<(RowId, &ChunkRecord)> = Vec::new();
 
-        // Resolve hashes that already exist; only append for novel hashes.
-        // Within-batch duplicates reuse the first new/existing row.
-        let mut batch_hash_to_row: std::collections::HashMap<[u8; 32], RowId> =
-            std::collections::HashMap::new();
-
         for (rec, vec) in chunks {
-            let hash = *rec.content_hash.as_bytes();
-            if let Some(row) = batch_hash_to_row.get(&hash) {
-                result.push(*row);
-                continue;
-            }
-            if let Some((row, _)) = self.get_by_hash(&rec.content_hash)? {
-                batch_hash_to_row.insert(hash, row);
-                result.push(row);
-                continue;
-            }
             let row = self.matrix_mut().append(vec)?;
-            batch_hash_to_row.insert(hash, row);
             new_rows.push((row, rec));
             result.push(row);
         }
@@ -359,6 +347,19 @@ impl ChunkStore {
         Ok(rows)
     }
 
+    /// All repository-relative paths with at least one live occurrence.
+    pub fn live_files(&self) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT file FROM chunks WHERE live = 1 ORDER BY file")?;
+        let files = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<BTreeSet<_>, _>>()?
+            .into_iter()
+            .collect();
+        Ok(files)
+    }
+
     /// All live matrix positions in ascending row order.
     pub fn live_rows(&self) -> Result<Vec<RowId>, StoreError> {
         let mut stmt = self
@@ -448,23 +449,6 @@ impl ChunkStore {
                 let id = id? as u64;
                 if id >= matrix_rows {
                     missing_rows.push(RowId::new(id));
-                }
-            }
-        }
-
-        // Duplicate live content hashes.
-        {
-            let mut stmt = self.conn.prepare(
-                "SELECT rowid FROM chunks WHERE live = 1 AND content_hash IN (
-                    SELECT content_hash FROM chunks WHERE live = 1
-                    GROUP BY content_hash HAVING COUNT(*) > 1
-                 )",
-            )?;
-            let ids = stmt.query_map([], |r| r.get::<_, i64>(0))?;
-            for id in ids {
-                let row = RowId::new(id? as u64);
-                if !duplicate_rows.contains(&row) {
-                    duplicate_rows.push(row);
                 }
             }
         }
@@ -761,7 +745,6 @@ fn init_schema(conn: &Connection) -> Result<(), StoreError> {
             content_hash BLOB NOT NULL,
             live INTEGER NOT NULL DEFAULT 1 CHECK (live IN (0, 1))
          );
-         CREATE UNIQUE INDEX chunks_live_hash ON chunks(content_hash) WHERE live = 1;
          CREATE INDEX chunks_file_live ON chunks(file) WHERE live = 1;",
     )?;
     Ok(())

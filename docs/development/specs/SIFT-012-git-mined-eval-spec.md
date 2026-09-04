@@ -156,15 +156,15 @@ exit criteria and whether Phase 2 is worth building.
    top-10, mean reciprocal rank, median and 95th percentile latency, and peak
    GPU memory are reported for lexical-only, dense-only, and fused
    configurations.  
-   Command: `cargo run --release -p eval --example evaluate -- <store-path> --ablations`
+   Command: `cargo run --release -p eval --features cuda --example evaluate -- <store-path> --model <model-dir> --ablations`
 3. The proxy efficiency measure is run against the keyword-search baseline and
    the byte counts for both are reported.  
-   Command: `cargo run --release -p eval --example proxy_kpi -- <repo-path> <store-path>`
+   Command: `cargo run --release -p eval --features cuda --example proxy_kpi -- <repo-path> <store-path> --model <model-dir>`
 4. The held-out hand-written question set is run and its results are read and
    judged, separately from the mined metrics.  
-   Command: `cargo run --release -p eval --example evaluate -- <store-path> --set handwritten`
+   Command: `cargo run --release -p eval --features cuda --example evaluate -- <store-path> --model <model-dir> --set handwritten`
 5. The documentation-derived set is run over a repository in the languages this
    project will be used on, and its figures are reported beside the mined
    corpus's rather than merged into them, so any gap between the two is
    visible.  
-   Command: `cargo run --release -p eval --example evaluate -- <store-path> --set docstring`
+   Command: `cargo run --release -p eval --features cuda --example evaluate -- <store-path> --model <model-dir> --set docstring`

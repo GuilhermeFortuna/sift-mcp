@@ -72,6 +72,17 @@ pub struct Resident {
     pub repo_dir: PathBuf,
 }
 
+fn dense_backend() -> DenseBackend {
+    #[cfg(feature = "cuda")]
+    {
+        DenseBackend::Cuda
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        DenseBackend::Cpu
+    }
+}
+
 /// Immutable search view used while an index runs against owned store parts.
 pub struct FrozenSearch {
     dense: DenseIndex,
@@ -86,10 +97,32 @@ pub struct FrozenSearch {
     pub indexed_commit: Option<String>,
 }
 
+/// Ready-state ownership split between immutable search data and the single
+/// mutable indexing owner. Searches clone only `search`, so they never hold
+/// the indexing mutex while doing inference or retrieval.
+pub struct ReadyResident {
+    pub search: Arc<FrozenSearch>,
+    pub parts: Mutex<ResidentParts>,
+}
+
+pub struct ResidentParts {
+    pub store: ChunkStore,
+    pub lexical: LexicalIndex,
+    pub embedder: Arc<dyn Embedder>,
+    pub repo_dir: PathBuf,
+}
+
+pub type IndexParts = (
+    Arc<FrozenSearch>,
+    ChunkStore,
+    LexicalIndex,
+    PathBuf,
+    Arc<dyn Embedder>,
+);
+
 pub enum ServingState {
     Starting,
-    /// Mutex because [`ChunkStore`] is `Send` but not `Sync`.
-    Ready(Arc<Mutex<Resident>>),
+    Ready(Arc<ReadyResident>),
     Indexing(Arc<FrozenSearch>),
     Stale(String),
 }
@@ -155,17 +188,17 @@ impl SharedState {
                 uptime_seconds: uptime,
             },
             ServingState::Ready(r) => {
-                let r = r.lock().unwrap();
-                let stats = r.store.stats().unwrap_or(storage::StoreStats {
+                let parts = r.parts.lock().unwrap();
+                let stats = parts.store.stats().unwrap_or(storage::StoreStats {
                     live: 0,
                     dead: 0,
                     dead_fraction: 0.0,
                 });
                 DaemonStatus {
-                    model_id: r.embedder.model_id().to_owned(),
+                    model_id: r.search.model_id.clone(),
                     chunks_live: stats.live,
                     chunks_dead: stats.dead,
-                    indexed_commit: r.store.indexed_commit().ok().flatten(),
+                    indexed_commit: parts.store.indexed_commit().ok().flatten(),
                     indexing: false,
                     resident_gpu_bytes: 0,
                     idle_seconds: idle,
@@ -221,11 +254,10 @@ impl Resident {
         let lexical = LexicalIndex::open(store.dir()).map_err(|e| DaemonError::Internal {
             detail: format!("open lexical: {e}"),
         })?;
-        let dense = DenseIndex::from_store(&store, DenseBackend::Cpu).map_err(|e| {
-            DaemonError::Internal {
+        let dense =
+            DenseIndex::from_store(&store, dense_backend()).map_err(|e| DaemonError::Internal {
                 detail: format!("open dense: {e}"),
-            }
-        })?;
+            })?;
         let identity = StoreIdentity::capture(store_dir, embedder.model_id())?;
         Ok(Self {
             store,
@@ -279,28 +311,49 @@ impl Resident {
     }
 }
 
-/// Split a ready resident into a frozen search view plus parts for indexing.
-pub fn split_for_index(
-    resident: Resident,
-) -> Result<(FrozenSearch, ChunkStore, PathBuf, Arc<dyn Embedder>), DaemonError> {
-    let stats = resident.store.stats().map_err(|e| DaemonError::Internal {
+impl Resident {
+    pub fn into_ready(self) -> Result<ReadyResident, DaemonError> {
+        let Resident {
+            store,
+            lexical,
+            dense,
+            embedder,
+            identity,
+            repo_dir,
+        } = self;
+        let frozen = freeze_search(&store, &lexical, dense, Arc::clone(&embedder), identity)?;
+        Ok(ReadyResident {
+            search: Arc::new(frozen),
+            parts: Mutex::new(ResidentParts {
+                store,
+                lexical,
+                embedder,
+                repo_dir,
+            }),
+        })
+    }
+}
+
+fn freeze_search(
+    store: &ChunkStore,
+    lexical: &LexicalIndex,
+    dense: DenseIndex,
+    embedder: Arc<dyn Embedder>,
+    identity: StoreIdentity,
+) -> Result<FrozenSearch, DaemonError> {
+    let stats = store.stats().map_err(|e| DaemonError::Internal {
         detail: format!("stats: {e}"),
     })?;
-    let indexed_commit = resident.store.indexed_commit().ok().flatten();
-    let live_rows = resident
-        .store
-        .live_rows()
-        .map_err(|e| DaemonError::Internal {
-            detail: format!("live_rows: {e}"),
-        })?;
-    let got = resident
-        .store
+    let indexed_commit = store.indexed_commit().ok().flatten();
+    let live_rows = store.live_rows().map_err(|e| DaemonError::Internal {
+        detail: format!("live_rows: {e}"),
+    })?;
+    let got = store
         .get_many(&live_rows)
         .map_err(|e| DaemonError::Internal {
             detail: format!("get_many: {e}"),
         })?;
-    let body_list = resident
-        .lexical
+    let body_list = lexical
         .bodies(&live_rows)
         .map_err(|e| DaemonError::Internal {
             detail: format!("bodies: {e}"),
@@ -316,22 +369,36 @@ pub fn split_for_index(
             records.insert(id, rec);
         }
     }
-    let lexical_handle = resident.lexical.search_handle();
-    let frozen = FrozenSearch {
-        dense: resident.dense,
-        lexical: lexical_handle,
+    Ok(FrozenSearch {
+        dense,
+        lexical: lexical.search_handle(),
         records,
         bodies,
-        embedder: Arc::clone(&resident.embedder),
-        identity: resident.identity.clone(),
-        model_id: resident.embedder.model_id().to_owned(),
+        model_id: embedder.model_id().to_owned(),
+        embedder,
+        identity,
         chunks_live: stats.live,
         chunks_dead: stats.dead,
         indexed_commit,
-    };
-    // Drop the lexical writer so Indexer can reopen it.
-    drop(resident.lexical);
-    Ok((frozen, resident.store, resident.repo_dir, resident.embedder))
+    })
+}
+
+/// Split a ready resident into the immutable search view and mutable index owner.
+pub fn split_for_index(ready: ReadyResident) -> Result<IndexParts, DaemonError> {
+    let search = ready.search;
+    let parts = ready
+        .parts
+        .into_inner()
+        .map_err(|_| DaemonError::Internal {
+            detail: "resident parts lock poisoned".into(),
+        })?;
+    Ok((
+        search,
+        parts.store,
+        parts.lexical,
+        parts.repo_dir,
+        parts.embedder,
+    ))
 }
 
 pub fn rebuild_resident(
@@ -344,7 +411,7 @@ pub fn rebuild_resident(
         detail: format!("live mask: {e}"),
     })?;
     let mut dense =
-        DenseIndex::from_store(&store, DenseBackend::Cpu).map_err(|e| DaemonError::Internal {
+        DenseIndex::from_store(&store, dense_backend()).map_err(|e| DaemonError::Internal {
             detail: format!("dense: {e}"),
         })?;
     dense

@@ -147,6 +147,27 @@ fn update_delete_tombstones_file_chunks() {
 }
 
 #[test]
+fn full_index_tombstones_files_missing_from_the_walk() {
+    let h = Harness::new(&[CommitSpec::new("init")
+        .file("keep.rs", sample_fn("keep"))
+        .file("gone.rs", sample_fn("gone"))]);
+    let mut indexer = h.indexer(IndexConfig {
+        compact_threshold: 1.0,
+        ..IndexConfig::default()
+    });
+    indexer.index_all(&mut NullProgress).unwrap();
+    let gone = indexer.store().rows_for_file("gone.rs").unwrap();
+    assert!(!gone.is_empty());
+
+    std::fs::remove_file(h.repo.path().join("gone.rs")).unwrap();
+    let report = indexer.index_all(&mut NullProgress).unwrap();
+
+    assert_eq!(report.chunks_removed, gone.len() as u64, "{report:?}");
+    assert!(indexer.store().rows_for_file("gone.rs").unwrap().is_empty());
+    assert_eq!(indexer.store().stats().unwrap().live, 1);
+}
+
+#[test]
 fn update_reorder_reembeds_nothing() {
     // Trailing sentinel keeps neither function at EOF so tree-sitter ranges
     // (and therefore content hashes) stay stable across reorder.
@@ -266,14 +287,34 @@ fn first_update_reconciles_dirty_paths_after_clean_index() {
 }
 
 #[test]
-fn duplicate_normalized_chunks_are_counted_once() {
+fn dirty_deletion_tombstones_the_old_file_rows() {
+    let h = Harness::new(&[CommitSpec::new("init").file("gone.rs", sample_fn("gone"))]);
+    let mut indexer = h.indexer(IndexConfig {
+        compact_threshold: 1.0,
+        ..IndexConfig::default()
+    });
+    indexer.index_all(&mut NullProgress).unwrap();
+    let gone = indexer.store().rows_for_file("gone.rs").unwrap();
+    assert!(!gone.is_empty());
+
+    std::fs::remove_file(h.repo.path().join("gone.rs")).unwrap();
+    let report = indexer.update(&mut NullProgress).unwrap();
+
+    assert_eq!(report.chunks_removed, gone.len() as u64, "{report:?}");
+    assert!(indexer.store().rows_for_file("gone.rs").unwrap().is_empty());
+}
+
+#[test]
+fn duplicate_normalized_chunks_keep_both_locations_but_embed_once() {
     let h = Harness::new(&[CommitSpec::new("init")
         .file("a.rs", sample_fn("same"))
         .file("b.rs", sample_fn("same"))]);
     let mut indexer = h.indexer(IndexConfig::default());
     let report = indexer.index_all(&mut NullProgress).unwrap();
-    assert_eq!(report.chunks_added, 1, "{report:?}");
+    assert_eq!(report.chunks_added, 2, "{report:?}");
     assert_eq!(report.embeddings_computed, 1, "{report:?}");
+    assert_eq!(indexer.store().rows_for_file("a.rs").unwrap().len(), 1);
+    assert_eq!(indexer.store().rows_for_file("b.rs").unwrap().len(), 1);
     report.assert_reconciles();
 }
 

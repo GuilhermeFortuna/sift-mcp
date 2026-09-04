@@ -28,5 +28,6 @@ rayon = { workspace = true }
 crossbeam-channel = { workspace = true }
 
 [dev-dependencies]
+half = { workspace = true }
 insta = { workspace = true }
 tempfile = { workspace = true }

@@ -13,7 +13,7 @@ resident = [
   "dep:inference",
   "retrieval/engine",
 ]
-cuda = ["resident", "inference/cuda"]
+cuda = ["resident", "inference/cuda", "retrieval/cuda"]
 
 [dependencies]
 storage = { path = "../storage", optional = true }

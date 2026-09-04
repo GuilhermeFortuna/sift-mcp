@@ -1,7 +1,7 @@
 //! Evaluate retrieval over a store.
 //!
 //! ```text
-//! cargo run --release -p eval --example evaluate -- <store-path> [--ablations] [--set mined|docstring|handwritten] [--repo <path>]
+//! cargo run --release -p eval --features cuda --example evaluate -- <store-path> --model <model-dir> [--ablations] [--set mined|docstring|handwritten] [--repo <path>]
 //! ```
 
 use std::env;
@@ -14,7 +14,7 @@ use eval::{
     load_handwritten, mine_commits, mine_docstrings,
 };
 use indexing::RepoGit;
-use inference::{Embedder, MockEmbedder};
+use inference::{Embedder, OnnxEmbedder};
 use retrieval::dense::{DenseBackend, DenseIndex};
 use retrieval::{FusionConfig, LexicalIndex, Searcher};
 use storage::ChunkStore;
@@ -32,6 +32,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut set_name = "mined".to_string();
     let mut repo: Option<PathBuf> = None;
     let mut store_path: Option<PathBuf> = None;
+    let mut model_dir: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -47,6 +48,12 @@ fn run() -> Result<(), Box<dyn Error>> {
                     args.get(i).ok_or("missing value for --repo")?,
                 ));
             }
+            "--model" => {
+                i += 1;
+                model_dir = Some(PathBuf::from(
+                    args.get(i).ok_or("missing value for --model")?,
+                ));
+            }
             flag if flag.starts_with('-') => {
                 return Err(format!("unknown flag {flag}").into());
             }
@@ -59,12 +66,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         i += 1;
     }
 
-    let store_path = store_path.ok_or("usage: evaluate <store-path> [--ablations] [--set …]")?;
+    let store_path = store_path
+        .ok_or("usage: evaluate <store-path> --model <model-dir> [--ablations] [--set …]")?;
+    let model_dir = model_dir.ok_or("evaluate requires --model <model-dir>")?;
     let store = ChunkStore::open(&store_path)?;
-    let embedder =
-        MockEmbedder::new(store.matrix().dims()).with_model_id(store.matrix().model_id());
+    let embedder = OnnxEmbedder::load(&model_dir, 32)?;
+    store.require_model(embedder.model_id())?;
     let lexical = LexicalIndex::open(store.dir())?;
-    let dense = DenseIndex::from_store(&store, DenseBackend::Cpu)?;
+    let dense = DenseIndex::from_store(&store, DenseBackend::Cuda)?;
     let searcher = Searcher::new(&lexical, &dense, &store, &embedder);
 
     let labels = match set_name.as_str() {

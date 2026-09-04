@@ -2,8 +2,8 @@
 
 use std::fs::File;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fs4::fs_std::FileExt;
@@ -137,10 +137,16 @@ impl Daemon {
                 std::thread::sleep(delay);
             }
             match Resident::load(&store_dir, &repo_dir, embedder) {
-                Ok(resident) => {
-                    *load_state.serving.write().unwrap() =
-                        ServingState::Ready(Arc::new(Mutex::new(resident)));
-                }
+                Ok(resident) => match resident.into_ready() {
+                    Ok(ready) => {
+                        *load_state.serving.write().unwrap() = ServingState::Ready(Arc::new(ready));
+                    }
+                    Err(e) => {
+                        warn!(error = ?e, "resident snapshot failed");
+                        *load_state.serving.write().unwrap() =
+                            ServingState::Stale(format!("snapshot failed: {e:?}"));
+                    }
+                },
                 Err(e) => {
                     warn!(error = ?e, "resident load failed");
                     *load_state.serving.write().unwrap() =
@@ -267,9 +273,9 @@ async fn handle_connection(stream: UnixStream, state: Arc<SharedState>) -> Resul
                 let guard = state.serving.read().unwrap();
                 match &*guard {
                     ServingState::Ready(r) => {
-                        let r = r.lock().unwrap();
-                        let live = r.store.stats().map(|s| s.live).unwrap_or(0);
-                        (r.embedder.model_id().to_owned(), live)
+                        let parts = r.parts.lock().unwrap();
+                        let live = parts.store.stats().map(|s| s.live).unwrap_or(0);
+                        (r.search.model_id.clone(), live)
                     }
                     ServingState::Indexing(f) => (f.model_id.clone(), f.chunks_live),
                     ServingState::Starting => (String::new(), 0),
@@ -329,9 +335,6 @@ async fn dispatch_request(
         }
         Request::Search { query, top_k } => {
             let delay = *state.search_delay.lock();
-            if let Some(d) = delay {
-                tokio::time::sleep(d).await;
-            }
             let _permit = state
                 .search_sem
                 .acquire()
@@ -343,7 +346,7 @@ async fn dispatch_request(
             let top_k = *top_k;
             let query = query.clone();
             enum Target {
-                Ready(Arc<Mutex<Resident>>),
+                Ready(Arc<crate::resident::FrozenSearch>),
                 Frozen(Arc<crate::resident::FrozenSearch>),
             }
             let target = {
@@ -353,15 +356,26 @@ async fn dispatch_request(
                     ServingState::Stale(r) => {
                         return Err(DaemonError::StoreStale { reason: r.clone() });
                     }
-                    ServingState::Ready(r) => Target::Ready(Arc::clone(r)),
+                    ServingState::Ready(r) => Target::Ready(Arc::clone(&r.search)),
                     ServingState::Indexing(f) => Target::Frozen(Arc::clone(f)),
                 }
             };
             let resp = match target {
-                Target::Frozen(f) => f.search(&query, top_k, &fusion).map(Response::Search)?,
+                Target::Frozen(f) => tokio::task::spawn_blocking(move || {
+                    if let Some(d) = delay {
+                        std::thread::sleep(d);
+                    }
+                    f.search(&query, top_k, &fusion).map(Response::Search)
+                })
+                .await
+                .map_err(|e| DaemonError::Internal {
+                    detail: format!("join: {e}"),
+                })??,
                 Target::Ready(ready) => tokio::task::spawn_blocking(move || {
-                    let r = ready.lock().unwrap();
-                    r.search(&query, top_k, &fusion).map(Response::Search)
+                    if let Some(d) = delay {
+                        std::thread::sleep(d);
+                    }
+                    ready.search(&query, top_k, &fusion).map(Response::Search)
                 })
                 .await
                 .map_err(|e| DaemonError::Internal {
@@ -387,7 +401,7 @@ async fn dispatch_request(
             let top_k = *top_k;
             let code = code.clone();
             enum Target {
-                Ready(Arc<Mutex<Resident>>),
+                Ready(Arc<crate::resident::FrozenSearch>),
                 Frozen(Arc<crate::resident::FrozenSearch>),
             }
             let target = {
@@ -397,7 +411,7 @@ async fn dispatch_request(
                     ServingState::Stale(r) => {
                         return Err(DaemonError::StoreStale { reason: r.clone() });
                     }
-                    ServingState::Ready(r) => Target::Ready(Arc::clone(r)),
+                    ServingState::Ready(r) => Target::Ready(Arc::clone(&r.search)),
                     ServingState::Indexing(f) => Target::Frozen(Arc::clone(f)),
                 }
             };
@@ -406,8 +420,8 @@ async fn dispatch_request(
                     .search_similar(&code, top_k, &fusion)
                     .map(Response::Search)?,
                 Target::Ready(ready) => tokio::task::spawn_blocking(move || {
-                    let r = ready.lock().unwrap();
-                    r.search_similar(&code, top_k, &fusion)
+                    ready
+                        .search_similar(&code, top_k, &fusion)
                         .map(Response::Search)
                 })
                 .await
@@ -422,7 +436,7 @@ async fn dispatch_request(
             let file = file.clone();
             let symbol = symbol.clone();
             enum Target {
-                Ready(Arc<Mutex<Resident>>),
+                Ready(Arc<crate::resident::FrozenSearch>),
                 Frozen(Arc<crate::resident::FrozenSearch>),
             }
             let target = {
@@ -432,20 +446,19 @@ async fn dispatch_request(
                     ServingState::Stale(r) => {
                         return Err(DaemonError::StoreStale { reason: r.clone() });
                     }
-                    ServingState::Ready(r) => Target::Ready(Arc::clone(r)),
+                    ServingState::Ready(r) => Target::Ready(Arc::clone(&r.search)),
                     ServingState::Indexing(f) => Target::Frozen(Arc::clone(f)),
                 }
             };
             let resp = match target {
                 Target::Frozen(f) => f.get_symbol(&file, &symbol)?,
-                Target::Ready(ready) => tokio::task::spawn_blocking(move || {
-                    let r = ready.lock().unwrap();
-                    r.get_symbol(&file, &symbol)
-                })
-                .await
-                .map_err(|e| DaemonError::Internal {
-                    detail: format!("join: {e}"),
-                })??,
+                Target::Ready(ready) => {
+                    tokio::task::spawn_blocking(move || ready.get_symbol(&file, &symbol))
+                        .await
+                        .map_err(|e| DaemonError::Internal {
+                            detail: format!("join: {e}"),
+                        })??
+                }
             };
             write_response(writer, request_id, resp).await?;
             Ok(None)
@@ -474,7 +487,7 @@ async fn dispatch_request(
                     let mut serve = state_c.serving.write().unwrap();
                     match std::mem::replace(&mut *serve, ServingState::Starting) {
                         ServingState::Ready(r) => match Arc::try_unwrap(r) {
-                            Ok(m) => m.into_inner().unwrap(),
+                            Ok(ready) => ready,
                             Err(r) => {
                                 *serve = ServingState::Ready(r);
                                 clear_indexing();
@@ -502,8 +515,8 @@ async fn dispatch_request(
                         return;
                     }
                 };
-                let (frozen, store, _resident_repo_dir, embedder) = split;
-                *state_c.serving.write().unwrap() = ServingState::Indexing(Arc::new(frozen));
+                let (frozen, store, lexical, _resident_repo_dir, embedder) = split;
+                *state_c.serving.write().unwrap() = ServingState::Indexing(frozen);
 
                 if let Some(d) = delay {
                     std::thread::sleep(d);
@@ -513,16 +526,25 @@ async fn dispatch_request(
                     tx: progress_tx,
                     delay,
                 };
+                drop(lexical);
                 let result = run_index(store, embedder.as_ref(), &repo_dir, full, &mut progress);
                 match result {
                     Ok((store, lexical, report)) => {
                         match rebuild_resident(store, lexical, embedder, repo_dir) {
-                            Ok(resident) => {
-                                *state_c.serving.write().unwrap() =
-                                    ServingState::Ready(Arc::new(Mutex::new(resident)));
-                                clear_indexing();
-                                let _ = done_tx.send(Ok(report));
-                            }
+                            Ok(resident) => match resident.into_ready() {
+                                Ok(ready) => {
+                                    *state_c.serving.write().unwrap() =
+                                        ServingState::Ready(Arc::new(ready));
+                                    clear_indexing();
+                                    let _ = done_tx.send(Ok(report));
+                                }
+                                Err(e) => {
+                                    *state_c.serving.write().unwrap() =
+                                        ServingState::Stale(format!("snapshot: {e:?}"));
+                                    clear_indexing();
+                                    let _ = done_tx.send(Err(e));
+                                }
+                            },
                             Err(e) => {
                                 *state_c.serving.write().unwrap() =
                                     ServingState::Stale(format!("rebuild: {e:?}"));

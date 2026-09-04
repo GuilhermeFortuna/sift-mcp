@@ -211,8 +211,8 @@ git diff --name-status
    v
 re-parse touched files only
    |
-   +-- unchanged hash  -> reuse embedding row
-   +-- new hash        -> embed, append row
+   +-- unchanged hash  -> reuse embedding computation, retain occurrence row
+   +-- new hash        -> embed, append occurrence row
    +-- vanished hash   -> tombstone row
 ```
 

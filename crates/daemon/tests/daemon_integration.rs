@@ -341,6 +341,11 @@ async fn concurrent_clients_overlap() {
         b1.duration_since(t0),
         t0
     );
+    assert!(
+        t0.elapsed() < Duration::from_millis(360),
+        "two 200ms searches should complete concurrently, elapsed={:?}",
+        t0.elapsed()
+    );
 }
 
 #[tokio::test]

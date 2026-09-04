@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,6 +12,7 @@ use crossbeam_channel::bounded;
 use inference::{Embedder, Role};
 use rayon::prelude::*;
 use retrieval::{LexicalDoc, LexicalIndex};
+use serde::{Deserialize, Serialize};
 use storage::{ChunkRecord, ChunkStore, CompactionReport, ContentHash, Integrity, RowId};
 
 use crate::chunker::Chunker;
@@ -118,6 +120,115 @@ pub struct Indexer<'a> {
     /// Test hook: fail after this many successful store batches.
     interrupt_after_batches: Option<u64>,
     batches_committed: u64,
+    publication: PublicationJournal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum PublicationOp {
+    Add { row: u64, doc: LexicalDoc },
+    Remove { rows: Vec<u64> },
+    UpdateFile { rows: Vec<u64> },
+    Renumber { mapping: Vec<(u64, u64)> },
+}
+
+struct PublicationJournal {
+    path: PathBuf,
+}
+
+impl PublicationJournal {
+    fn new(store: &ChunkStore) -> Self {
+        Self {
+            path: store.dir().join("index.publication"),
+        }
+    }
+
+    fn prepare(&self, ops: &[PublicationOp]) -> Result<(), IndexError> {
+        if self.path.exists() {
+            return Err(IndexError::Other(
+                "publication journal already contains an unfinished operation".into(),
+            ));
+        }
+        let tmp = self.path.with_extension("publication.tmp");
+        let bytes = serde_json::to_vec(ops).map_err(|e| IndexError::Other(e.to_string()))?;
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&tmp, &self.path)?;
+        if let Some(parent) = self.path.parent()
+            && let Ok(dir) = fs::File::open(parent)
+        {
+            let _ = dir.sync_all();
+        }
+        Ok(())
+    }
+
+    fn clear(&self) -> Result<(), IndexError> {
+        if self.path.exists() {
+            fs::remove_file(&self.path)?;
+        }
+        Ok(())
+    }
+
+    fn recover(&self, store: &ChunkStore, lexical: &mut LexicalIndex) -> Result<(), IndexError> {
+        if !self.path.exists() {
+            return Ok(());
+        }
+        let bytes = fs::read(&self.path)?;
+        let ops: Vec<PublicationOp> = serde_json::from_slice(&bytes)
+            .map_err(|e| IndexError::Other(format!("publication journal: {e}")))?;
+        for op in ops {
+            match op {
+                PublicationOp::Add { row, doc } => {
+                    let row = RowId::from_u64(row);
+                    if store.get(row)?.is_some() {
+                        lexical.add_batch(&[(row, doc)])?;
+                    } else {
+                        lexical.remove(&[row])?;
+                    }
+                }
+                PublicationOp::Remove { rows } => {
+                    let mut removed = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        let row = RowId::from_u64(row);
+                        if store.get(row)?.is_none() {
+                            removed.push(row);
+                        }
+                    }
+                    let rows = removed;
+                    lexical.remove(&rows)?;
+                }
+                PublicationOp::UpdateFile { rows } => {
+                    let mut paths = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        let row = RowId::from_u64(row);
+                        if let Some(record) = store.get(row)? {
+                            paths.push((row, record.file));
+                        }
+                    }
+                    lexical.update_file_paths(&paths)?;
+                }
+                PublicationOp::Renumber { mapping } => {
+                    let expected_rows = mapping
+                        .iter()
+                        .map(|(_, new)| new.saturating_add(1))
+                        .max()
+                        .unwrap_or(0);
+                    if store.matrix().rows() == expected_rows
+                        && store.stats()?.live == expected_rows
+                    {
+                        lexical.renumber(
+                            &mapping
+                                .into_iter()
+                                .map(|(old, new)| (RowId::from_u64(old), RowId::from_u64(new)))
+                                .collect::<Vec<_>>(),
+                        )?;
+                    }
+                }
+            }
+        }
+        lexical.commit()?;
+        self.clear()
+    }
 }
 
 enum ParsedFile {
@@ -146,7 +257,9 @@ impl<'a> Indexer<'a> {
     ) -> Result<Self, IndexError> {
         store.require_model(embedder.model_id())?;
         let live = store.stats()?.live;
-        let lexical = LexicalIndex::open(store.dir())?;
+        let mut lexical = LexicalIndex::open(store.dir())?;
+        let publication = PublicationJournal::new(&store);
+        publication.recover(&store, &mut lexical)?;
         let indexed = lexical.num_docs();
         if live != indexed {
             return Err(IndexError::LexicalOutOfSync {
@@ -166,6 +279,7 @@ impl<'a> Indexer<'a> {
             config,
             interrupt_after_batches: None,
             batches_committed: 0,
+            publication,
         })
     }
 
@@ -204,7 +318,9 @@ impl<'a> Indexer<'a> {
         self.apply_dirty_policy(dirty)?;
 
         progress.phase(Phase::Walking, 0, None);
-        let work = self.collect_all_files(&mut report)?;
+        let (work, present_files) = self.collect_all_files(&mut report)?;
+
+        self.reconcile_absent_files(&present_files, &mut report)?;
 
         self.process_work_items(work, &mut report, progress)?;
 
@@ -241,6 +357,8 @@ impl<'a> Indexer<'a> {
             for path in self.git.dirty_paths()? {
                 if let Some(item) = self.work_item_for_path(&path, &mut report)? {
                     work.push(item);
+                } else {
+                    self.remove_file(&path, &mut report)?;
                 }
             }
         }
@@ -303,10 +421,29 @@ impl<'a> Indexer<'a> {
         if stats.dead_fraction > self.config.compact_threshold {
             progress.phase(Phase::Compacting, 0, None);
             let t = Instant::now();
+            let mapping = self
+                .store
+                .live_rows()?
+                .into_iter()
+                .enumerate()
+                .map(|(new_row, old_row)| (old_row, RowId::from_u64(new_row as u64)))
+                .collect::<Vec<_>>();
+            self.publication.prepare(&[PublicationOp::Renumber {
+                mapping: mapping
+                    .iter()
+                    .map(|(old, new)| (old.get(), new.get()))
+                    .collect(),
+            }])?;
             let compact_report = self.store.compact()?;
             report.store_millis += t.elapsed().as_millis() as u64;
+            if compact_report.row_mapping != mapping {
+                return Err(IndexError::Other(
+                    "compaction row mapping changed after publication prepare".into(),
+                ));
+            }
             self.lexical.renumber(&compact_report.row_mapping)?;
             self.lexical.commit()?;
+            self.publication.clear()?;
             report.compacted = Some(compact_report);
         }
         Ok(())
@@ -323,21 +460,20 @@ impl<'a> Indexer<'a> {
                 FileChange::Added(path) | FileChange::Modified(path) => {
                     if let Some(item) = self.work_item_for_path(path, report)? {
                         work.push(item);
+                    } else {
+                        self.remove_file(path, report)?;
                     }
                 }
                 FileChange::Deleted(path) => {
-                    let rows = self.store.rows_for_file(path)?;
-                    let n = rows.len() as u64;
-                    if n > 0 {
-                        self.store.tombstone(&rows)?;
-                        self.lexical.remove(&rows)?;
-                        self.lexical.commit()?;
-                        report.chunks_removed += n;
-                        report.files_indexed += 1;
-                    }
+                    self.remove_file(path, report)?;
                 }
                 FileChange::Renamed { from, to } => {
                     let rows = self.store.rows_for_file(from)?;
+                    if !rows.is_empty() {
+                        self.publication.prepare(&[PublicationOp::UpdateFile {
+                            rows: rows.iter().map(|row| row.get()).collect(),
+                        }])?;
+                    }
                     let n = self.store.rekey_file(from, to)?;
                     if n > 0 {
                         let paths = rows
@@ -346,12 +482,13 @@ impl<'a> Indexer<'a> {
                             .collect::<Vec<_>>();
                         self.lexical.update_file_paths(&paths)?;
                         self.lexical.commit()?;
+                        self.publication.clear()?;
                         // Re-parse destination so content changes bundled with a
                         // rename are reconciled; pure renames skip via hash set.
                         if let Some(item) = self.work_item_for_path(to, report)? {
                             work.push(item);
                         } else {
-                            report.files_indexed += 1;
+                            self.remove_file(to, report)?;
                         }
                     } else if let Some(item) = self.work_item_for_path(to, report)? {
                         work.push(item);
@@ -378,9 +515,10 @@ impl<'a> Indexer<'a> {
             return Ok(None);
         };
 
-        let source = match self.read_source(rel)? {
-            Some(s) => s,
-            None => return Ok(None),
+        let source = match self.read_source(rel) {
+            Ok(Some(s)) => s,
+            Ok(None) | Err(IndexError::Io(_)) => return Ok(None),
+            Err(e) => return Err(e),
         };
 
         Ok(Some(WorkItem {
@@ -427,8 +565,12 @@ impl<'a> Indexer<'a> {
         Ok(std::str::from_utf8(&bytes).ok().map(str::to_string))
     }
 
-    fn collect_all_files(&self, report: &mut IndexReport) -> Result<Vec<WorkItem>, IndexError> {
+    fn collect_all_files(
+        &self,
+        report: &mut IndexReport,
+    ) -> Result<(Vec<WorkItem>, HashSet<String>), IndexError> {
         let mut work = Vec::new();
+        let mut present_files = HashSet::new();
         let mut stack = vec![self.repo.clone()];
         while let Some(dir) = stack.pop() {
             let entries = match fs::read_dir(&dir) {
@@ -471,19 +613,54 @@ impl<'a> Indexer<'a> {
                     .unwrap_or(&path)
                     .to_string_lossy()
                     .replace('\\', "/");
-                match self.read_source(&rel)? {
-                    Some(source) => work.push(WorkItem {
-                        rel,
-                        language,
-                        source,
-                    }),
-                    None => {
+                match self.read_source(&rel) {
+                    Ok(Some(source)) => {
+                        present_files.insert(rel.clone());
+                        work.push(WorkItem {
+                            rel,
+                            language,
+                            source,
+                        });
+                    }
+                    Ok(None) | Err(IndexError::Io(_)) => {
                         report.files_excluded += 1;
                     }
+                    Err(e) => return Err(e),
                 }
             }
         }
-        Ok(work)
+        Ok((work, present_files))
+    }
+
+    fn reconcile_absent_files(
+        &mut self,
+        present_files: &HashSet<String>,
+        report: &mut IndexReport,
+    ) -> Result<(), IndexError> {
+        for file in self.store.live_files()? {
+            if !present_files.contains(&file) {
+                self.remove_file(&file, report)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_file(&mut self, file: &str, report: &mut IndexReport) -> Result<(), IndexError> {
+        let rows = self.store.rows_for_file(file)?;
+        let n = rows.len() as u64;
+        if n == 0 {
+            return Ok(());
+        }
+        self.publication.prepare(&[PublicationOp::Remove {
+            rows: rows.iter().map(|row| row.get()).collect(),
+        }])?;
+        self.store.tombstone(&rows)?;
+        self.lexical.remove(&rows)?;
+        self.lexical.commit()?;
+        self.publication.clear()?;
+        report.chunks_removed += n;
+        report.files_indexed += 1;
+        Ok(())
     }
 
     fn process_work_items(
@@ -504,13 +681,13 @@ impl<'a> Indexer<'a> {
             self.config.parse_threads
         };
 
-        let mut existing: HashMap<String, HashMap<ContentHash, RowId>> = HashMap::new();
+        let mut existing: HashMap<String, HashMap<ContentHash, Vec<RowId>>> = HashMap::new();
         for item in &work {
             let rows = self.store.rows_for_file(&item.rel)?;
-            let mut map = HashMap::new();
+            let mut map: HashMap<ContentHash, Vec<RowId>> = HashMap::new();
             for row in rows {
                 if let Some(rec) = self.store.get(row)? {
-                    map.insert(rec.content_hash, row);
+                    map.entry(rec.content_hash).or_default().push(row);
                 }
             }
             existing.insert(item.rel.clone(), map);
@@ -528,13 +705,6 @@ impl<'a> Indexer<'a> {
 
         let existing_for_parse = existing.clone();
         let mut consume_err: Option<IndexError> = None;
-        let mut known_hashes = HashSet::new();
-        for row in self.store.live_rows()? {
-            if let Some(record) = self.store.get(row)? {
-                known_hashes.insert(record.content_hash);
-            }
-        }
-
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 pool.install(|| {
@@ -556,16 +726,18 @@ impl<'a> Indexer<'a> {
                             return;
                         }
 
-                        let new_hashes: HashSet<ContentHash> =
-                            file.chunks.iter().map(|c| c.record.content_hash).collect();
-                        let old_hashes: HashSet<ContentHash> = existing_for_parse
+                        let mut new_counts: HashMap<ContentHash, usize> = HashMap::new();
+                        for chunk in &file.chunks {
+                            *new_counts.entry(chunk.record.content_hash).or_default() += 1;
+                        }
+                        let old_counts: HashMap<ContentHash, usize> = existing_for_parse
                             .get(&item.rel)
-                            .map(|m| m.keys().copied().collect())
+                            .map(|m| m.iter().map(|(hash, rows)| (*hash, rows.len())).collect())
                             .unwrap_or_default();
 
-                        if new_hashes == old_hashes {
+                        if new_counts == old_counts {
                             let _ = tx.send(ParsedFile::SkipIdentical {
-                                reused: new_hashes.len() as u64,
+                                reused: file.chunks.len() as u64,
                             });
                             return;
                         }
@@ -584,7 +756,6 @@ impl<'a> Indexer<'a> {
             });
 
             let mut pending: Vec<(ChunkRecord, String)> = Vec::new();
-            let mut pending_rels: Vec<String> = Vec::new();
             let mut done = 0u64;
 
             for parsed in rx {
@@ -600,18 +771,26 @@ impl<'a> Indexer<'a> {
                     }
                     ParsedFile::Ok { rel, chunks } => {
                         report.files_indexed += 1;
-                        let old = existing.get(&rel).cloned().unwrap_or_default();
-                        let new_hashes: HashSet<ContentHash> =
-                            chunks.iter().map(|(r, _)| r.content_hash).collect();
+                        let mut old = existing.get(&rel).cloned().unwrap_or_default();
+                        let mut new_counts: HashMap<ContentHash, usize> = HashMap::new();
+                        for (record, _) in &chunks {
+                            *new_counts.entry(record.content_hash).or_default() += 1;
+                        }
 
-                        // Tombstone hashes that vanished from this file.
-                        let to_tombstone: Vec<RowId> = old
-                            .iter()
-                            .filter(|(h, _)| !new_hashes.contains(h))
-                            .map(|(_, id)| *id)
-                            .collect();
+                        // Tombstone occurrences that vanished from this file.
+                        let mut to_tombstone = Vec::new();
+                        for (hash, rows) in &old {
+                            let keep = new_counts.get(hash).copied().unwrap_or(0);
+                            to_tombstone.extend(rows.iter().skip(keep).copied());
+                        }
                         if !to_tombstone.is_empty() {
                             let t = Instant::now();
+                            if let Err(e) = self.publication.prepare(&[PublicationOp::Remove {
+                                rows: to_tombstone.iter().map(|row| row.get()).collect(),
+                            }]) {
+                                consume_err = Some(e);
+                                break;
+                            }
                             if let Err(e) = self.store.tombstone(&to_tombstone) {
                                 consume_err = Some(e.into());
                                 break;
@@ -624,32 +803,25 @@ impl<'a> Indexer<'a> {
                                 consume_err = Some(e.into());
                                 break;
                             }
+                            if let Err(e) = self.publication.clear() {
+                                consume_err = Some(e);
+                                break;
+                            }
                             report.store_millis += t.elapsed().as_millis() as u64;
                             report.chunks_removed += to_tombstone.len() as u64;
                         }
 
                         for (rec, body) in chunks {
-                            if old.contains_key(&rec.content_hash) {
+                            if old.get_mut(&rec.content_hash).and_then(Vec::pop).is_some() {
                                 report.chunks_reused += 1;
                                 continue;
                             }
-                            // Another changed file may already have inserted
-                            // the same normalized body. Reuse that row too;
-                            // never spend embedding time on a hash the store
-                            // already owns.
-                            if known_hashes.contains(&rec.content_hash) {
-                                report.chunks_reused += 1;
-                                continue;
-                            }
-                            known_hashes.insert(rec.content_hash);
                             pending.push((rec, body));
-                            pending_rels.push(rel.clone());
-                            if pending.len() >= self.config.embed_batch {
-                                if let Err(e) = self.flush_batch(&mut pending, report, progress) {
-                                    consume_err = Some(e);
-                                    break;
-                                }
-                                pending_rels.clear();
+                            if pending.len() >= self.config.embed_batch
+                                && let Err(e) = self.flush_batch(&mut pending, report, progress)
+                            {
+                                consume_err = Some(e);
+                                break;
                             }
                         }
                         if consume_err.is_some() {
@@ -685,13 +857,14 @@ impl<'a> Indexer<'a> {
         }
         progress.phase(Phase::Embedding, report.embeddings_computed, None);
         // A batch can contain identical normalized bodies from different
-        // files. The store intentionally shares one embedding row for those
-        // hashes, so embed and index one deterministic representative only.
+        // files. Compute one embedding per hash, but retain one store and
+        // lexical row for every file occurrence so location metadata survives.
+        let items = std::mem::take(pending);
         let mut seen = HashSet::new();
-        let mut unique = Vec::with_capacity(pending.len());
-        for item in pending.drain(..) {
+        let mut unique = Vec::with_capacity(items.len());
+        for item in &items {
             if seen.insert(item.0.content_hash) {
-                unique.push(item);
+                unique.push(item.clone());
             }
         }
         if unique.is_empty() {
@@ -703,7 +876,12 @@ impl<'a> Indexer<'a> {
         report.embed_millis += t_embed.elapsed().as_millis() as u64;
 
         assert_eq!(embeddings.len(), unique.len());
-        let lexical_docs: Vec<_> = unique
+        let mut embedding_by_hash = HashMap::with_capacity(unique.len());
+        for (item, embedding) in unique.iter().zip(embeddings.iter()) {
+            embedding_by_hash.insert(item.0.content_hash, embedding.clone());
+        }
+
+        let lexical_docs: Vec<_> = items
             .iter()
             .map(|(rec, body)| {
                 (
@@ -718,18 +896,45 @@ impl<'a> Indexer<'a> {
                 )
             })
             .collect();
-        let mut batch = Vec::with_capacity(pending.len());
-        for ((rec, _), emb) in unique.iter().zip(embeddings) {
+        let mut batch = Vec::with_capacity(items.len());
+        for (rec, _) in &items {
+            let emb = embedding_by_hash
+                .get(&rec.content_hash)
+                .expect("embedding exists for every pending content hash");
             if emb.truncated {
                 report.chunks_truncated += 1;
             }
-            batch.push((rec.clone(), emb.vector));
+            batch.push((rec.clone(), emb.vector.clone()));
         }
+
+        let base_row = self.store.matrix().rows();
+        let publication_ops = lexical_docs
+            .iter()
+            .enumerate()
+            .map(|(offset, (_, doc))| PublicationOp::Add {
+                row: base_row + offset as u64,
+                doc: doc.clone(),
+            })
+            .collect::<Vec<_>>();
+        self.publication.prepare(&publication_ops)?;
 
         progress.phase(Phase::Storing, report.chunks_added, None);
         let t_store = Instant::now();
         let ids = self.store.insert_batch(&batch)?;
         report.store_millis += t_store.elapsed().as_millis() as u64;
+
+        let expected_ids = publication_ops
+            .iter()
+            .map(|op| match op {
+                PublicationOp::Add { row, .. } => RowId::from_u64(*row),
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        if ids != expected_ids {
+            return Err(IndexError::Other(
+                "store row allocation changed after publication prepare".into(),
+            ));
+        }
 
         self.lexical.add_batch(
             &ids.into_iter()
@@ -737,11 +942,11 @@ impl<'a> Indexer<'a> {
                 .collect::<Vec<_>>(),
         )?;
         self.lexical.commit()?;
-        pending.clear();
+        self.publication.clear()?;
 
         let novel = batch.len() as u64;
         report.chunks_added += novel;
-        report.embeddings_computed += novel;
+        report.embeddings_computed += unique.len() as u64;
         self.batches_committed += 1;
 
         if let Some(limit) = self.interrupt_after_batches
@@ -783,5 +988,84 @@ pub fn require_verify_ok(store: &ChunkStore) -> Result<(), IndexError> {
     match store.verify()? {
         Integrity::Ok { .. } => Ok(()),
         other => Err(IndexError::Other(format!("verify failed: {other:?}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use half::f16;
+    use retrieval::{LexicalDoc, LexicalIndex};
+    use storage::{ChunkRecord, ChunkStore, ContentHash};
+    use tempfile::tempdir;
+
+    use super::{PublicationJournal, PublicationOp};
+
+    fn record() -> ChunkRecord {
+        ChunkRecord {
+            repository: "test".into(),
+            file: "src/lib.rs".into(),
+            language: "rust".into(),
+            symbol: "answer".into(),
+            symbol_type: "function".into(),
+            signature: "fn answer()".into(),
+            doc_first_line: Some("Returns the answer".into()),
+            line_start: 1,
+            line_end: 3,
+            content_hash: ContentHash::of(b"answer"),
+        }
+    }
+
+    fn document() -> LexicalDoc {
+        LexicalDoc {
+            symbol: "answer".into(),
+            signature: "fn answer()".into(),
+            doc_first_line: Some("Returns the answer".into()),
+            file: "src/lib.rs".into(),
+            body: "fn answer() { 42 }".into(),
+        }
+    }
+
+    #[test]
+    fn publication_recovery_replays_a_store_committed_add() {
+        let dir = tempdir().unwrap();
+        let mut store = ChunkStore::create(dir.path(), 1, "model").unwrap();
+        let row = store
+            .insert_batch(&[(record(), vec![f16::from_f32(1.0)])])
+            .unwrap()[0];
+        let journal = PublicationJournal::new(&store);
+        journal
+            .prepare(&[PublicationOp::Add {
+                row: row.get(),
+                doc: document(),
+            }])
+            .unwrap();
+
+        let mut lexical = LexicalIndex::open(dir.path()).unwrap();
+        journal.recover(&store, &mut lexical).unwrap();
+
+        assert_eq!(lexical.num_docs(), 1);
+        assert!(!journal.path.exists());
+    }
+
+    #[test]
+    fn publication_recovery_does_not_apply_remove_before_store_tombstone() {
+        let dir = tempdir().unwrap();
+        let mut store = ChunkStore::create(dir.path(), 1, "model").unwrap();
+        let row = store
+            .insert_batch(&[(record(), vec![f16::from_f32(1.0)])])
+            .unwrap()[0];
+        let mut lexical = LexicalIndex::open(dir.path()).unwrap();
+        lexical.add_batch(&[(row, document())]).unwrap();
+        lexical.commit().unwrap();
+
+        let journal = PublicationJournal::new(&store);
+        journal
+            .prepare(&[PublicationOp::Remove {
+                rows: vec![row.get()],
+            }])
+            .unwrap();
+        journal.recover(&store, &mut lexical).unwrap();
+
+        assert_eq!(lexical.num_docs(), 1);
     }
 }

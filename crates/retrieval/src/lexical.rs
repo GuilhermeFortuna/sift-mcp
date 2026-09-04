@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use tantivy::collector::{Collector, SegmentCollector, TopDocs, TopNComputer};
 use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, TermQuery};
 use tantivy::schema::{
@@ -34,6 +35,7 @@ const INDEX_DIRECTORY: &str = "lexical";
 const TOKENIZER_NAME: &str = "code";
 const WRITER_MEMORY_BYTES: usize = 50_000_000;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LexicalDoc {
     pub symbol: String,
     pub signature: String,
