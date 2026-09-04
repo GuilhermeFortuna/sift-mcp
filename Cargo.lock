@@ -2886,6 +2886,8 @@ dependencies = [
  "half",
  "inference",
  "insta",
+ "serde",
+ "serde_json",
  "storage",
  "tantivy",
  "tempfile",
