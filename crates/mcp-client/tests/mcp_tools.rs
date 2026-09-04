@@ -300,16 +300,18 @@ async fn cold_start_spawns_daemon_and_searches() {
 
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
-        });
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
     let bin = target_dir.join("debug/sift-daemon-test");
     let status = std::process::Command::new("cargo")
         .args(["build", "-p", "daemon", "--bin", "sift-daemon-test"])
         .status()
         .unwrap();
     assert!(status.success(), "failed to build sift-daemon-test");
-    assert!(bin.exists(), "sift-daemon-test missing at {}", bin.display());
+    assert!(
+        bin.exists(),
+        "sift-daemon-test missing at {}",
+        bin.display()
+    );
 
     let server = SiftMcpServer::with_config(SiftMcpConfig {
         store_dir: h.store_dir.path().to_path_buf(),
