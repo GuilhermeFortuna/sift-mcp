@@ -68,6 +68,48 @@ pub struct LexicalIndex {
     fields: Fields,
 }
 
+/// Sync read-only view of the lexical index for concurrent retrieval.
+#[derive(Clone)]
+pub struct LexicalSearchHandle {
+    reader: IndexReader,
+    fields: Fields,
+}
+
+impl LexicalSearchHandle {
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<ScoredRow>, RetrievalError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(parsed) = build_query(self.fields, query) else {
+            return Ok(Vec::new());
+        };
+        let searcher = self.reader.searcher();
+        let top_docs = searcher
+            .search(&parsed, &RowTopCollector { limit })
+            .map_err(tantivy_error)?;
+        let mut rows = Vec::with_capacity(top_docs.len());
+        for (score, (row, _address)) in top_docs {
+            rows.push(ScoredRow {
+                row: RowId::from_u64(row),
+                score,
+            });
+        }
+        Ok(rows)
+    }
+
+    pub fn bodies(&self, rows: &[RowId]) -> Result<Vec<Option<String>>, RetrievalError> {
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let body = match load_document(&self.reader, self.fields, *row)? {
+                Some(document) => lexical_doc(&document, self.fields).map(|doc| doc.body),
+                None => None,
+            };
+            out.push(body);
+        }
+        Ok(out)
+    }
+}
+
 struct RowTopCollector {
     limit: usize,
 }
@@ -234,85 +276,89 @@ impl LexicalIndex {
     /// Scores are non-negative and unnormalized, so callers must not compare
     /// scores across queries.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<ScoredRow>, RetrievalError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let Some(parsed) = self.build_query(query) else {
-            return Ok(Vec::new());
-        };
-        let searcher = self.reader.searcher();
-        let top_docs = searcher
-            .search(&parsed, &RowTopCollector { limit })
-            .map_err(tantivy_error)?;
-        let mut rows = Vec::with_capacity(top_docs.len());
-        for (score, (row, _address)) in top_docs {
-            rows.push(ScoredRow {
-                row: RowId::from_u64(row),
-                score,
-            });
-        }
-        Ok(rows)
+        self.search_handle().search(query, limit)
     }
 
-    fn build_query(&self, query: &str) -> Option<Box<dyn Query>> {
-        let mut tokenizer = CodeTokenizer::new();
-        let mut stream = tokenizer.token_stream(query);
-        let mut terms = Vec::new();
-        stream.process(&mut |token| {
-            if !terms.iter().any(|term: &String| term == &token.text) {
-                terms.push(token.text.clone());
-            }
-        });
-        if terms.is_empty() {
-            return None;
+    /// Clone a Sync read-only handle for concurrent search.
+    pub fn search_handle(&self) -> LexicalSearchHandle {
+        LexicalSearchHandle {
+            reader: self.reader.clone(),
+            fields: self.fields,
         }
+    }
 
-        let fields = [
-            (self.fields.symbol, SYMBOL_BOOST),
-            (self.fields.signature, SIGNATURE_BOOST),
-            (self.fields.doc, DOC_BOOST),
-            (self.fields.body, BODY_BOOST),
-            (self.fields.file, FILE_BOOST),
-        ];
-        let clauses = terms
-            .iter()
-            .flat_map(|term| {
-                fields.iter().map(move |(field, boost)| {
-                    let term_query = TermQuery::new(
-                        tantivy::Term::from_field_text(*field, term),
-                        IndexRecordOption::WithFreqsAndPositions,
-                    );
-                    (
-                        Occur::Should,
-                        Box::new(BoostQuery::new(Box::new(term_query), *boost)) as Box<dyn Query>,
-                    )
-                })
-            })
-            .collect();
-        Some(Box::new(BooleanQuery::new(clauses)))
+    /// Load stored bodies for `rows` in request order. Missing rows yield `None`.
+    pub fn bodies(&self, rows: &[RowId]) -> Result<Vec<Option<String>>, RetrievalError> {
+        self.search_handle().bodies(rows)
     }
 
     fn load_document(&self, row: RowId) -> Result<Option<TantivyDocument>, RetrievalError> {
-        let query = TermQuery::new(
-            Term::from_field_u64(self.fields.row, row.get()),
-            IndexRecordOption::Basic,
-        );
-        let searcher = self.reader.searcher();
-        let mut documents = searcher
-            .search(&query, &TopDocs::with_limit(1))
-            .map_err(tantivy_error)?;
-        let Some((_, address)) = documents.pop() else {
-            return Ok(None);
-        };
-        searcher
-            .doc::<TantivyDocument>(address)
-            .map(Some)
-            .map_err(tantivy_error)
+        load_document(&self.reader, self.fields, row)
     }
 
     pub fn num_docs(&self) -> u64 {
         self.reader.searcher().num_docs()
     }
+}
+
+fn build_query(fields: Fields, query: &str) -> Option<Box<dyn Query>> {
+    let mut tokenizer = CodeTokenizer::new();
+    let mut stream = tokenizer.token_stream(query);
+    let mut terms = Vec::new();
+    stream.process(&mut |token| {
+        if !terms.iter().any(|term: &String| term == &token.text) {
+            terms.push(token.text.clone());
+        }
+    });
+    if terms.is_empty() {
+        return None;
+    }
+
+    let field_boosts = [
+        (fields.symbol, SYMBOL_BOOST),
+        (fields.signature, SIGNATURE_BOOST),
+        (fields.doc, DOC_BOOST),
+        (fields.body, BODY_BOOST),
+        (fields.file, FILE_BOOST),
+    ];
+    let clauses = terms
+        .iter()
+        .flat_map(|term| {
+            field_boosts.iter().map(move |(field, boost)| {
+                let term_query = TermQuery::new(
+                    tantivy::Term::from_field_text(*field, term),
+                    IndexRecordOption::WithFreqsAndPositions,
+                );
+                (
+                    Occur::Should,
+                    Box::new(BoostQuery::new(Box::new(term_query), *boost)) as Box<dyn Query>,
+                )
+            })
+        })
+        .collect();
+    Some(Box::new(BooleanQuery::new(clauses)))
+}
+
+fn load_document(
+    reader: &IndexReader,
+    fields: Fields,
+    row: RowId,
+) -> Result<Option<TantivyDocument>, RetrievalError> {
+    let query = TermQuery::new(
+        Term::from_field_u64(fields.row, row.get()),
+        IndexRecordOption::Basic,
+    );
+    let searcher = reader.searcher();
+    let mut documents = searcher
+        .search(&query, &TopDocs::with_limit(1))
+        .map_err(tantivy_error)?;
+    let Some((_, address)) = documents.pop() else {
+        return Ok(None);
+    };
+    searcher
+        .doc::<TantivyDocument>(address)
+        .map(Some)
+        .map_err(tantivy_error)
 }
 
 fn tantivy_error(error: impl std::fmt::Display) -> RetrievalError {

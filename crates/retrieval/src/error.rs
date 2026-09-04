@@ -20,4 +20,7 @@ pub enum RetrievalError {
 
     #[error("dense index error: {0}")]
     Dense(String),
+
+    #[error("both retrievers failed: lexical={lexical}; dense={dense}")]
+    BothRetrieversFailed { lexical: String, dense: String },
 }
