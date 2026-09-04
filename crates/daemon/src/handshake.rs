@@ -1,8 +1,6 @@
 //! Per-connection handshake and request dispatch helpers.
 
-use crate::protocol::{
-    DaemonError, DaemonStatus, Envelope, Request, Response, PROTOCOL_VERSION,
-};
+use crate::protocol::{DaemonError, DaemonStatus, Envelope, PROTOCOL_VERSION, Request, Response};
 
 /// Result of attempting to accept a Hello from a client.
 #[derive(Debug, Clone, PartialEq)]

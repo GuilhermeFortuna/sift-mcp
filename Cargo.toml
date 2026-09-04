@@ -55,3 +55,5 @@ bincode = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 fs4 = "0.13"
+futures = "0.3"
+parking_lot = "0.12"

@@ -75,9 +75,11 @@ pub fn write_frame<T: serde::Serialize>(
     value: &T,
 ) -> Result<(), DaemonError> {
     let bytes = encode(value)?;
-    writer.write_all(&bytes).map_err(|e| DaemonError::Internal {
-        detail: format!("write frame: {e}"),
-    })?;
+    writer
+        .write_all(&bytes)
+        .map_err(|e| DaemonError::Internal {
+            detail: format!("write frame: {e}"),
+        })?;
     Ok(())
 }
 
@@ -156,7 +158,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
-    use crate::protocol::{Envelope, Request, PROTOCOL_VERSION};
+    use crate::protocol::{Envelope, PROTOCOL_VERSION, Request};
 
     fn sample_envelope() -> Envelope<Request> {
         Envelope {

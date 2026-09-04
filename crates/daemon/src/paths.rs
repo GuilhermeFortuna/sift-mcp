@@ -35,14 +35,9 @@ pub fn lock_path_for_store(store_dir: &Path) -> Result<PathBuf, DaemonError> {
     Ok(runtime_dir_for_store(store_dir)?.join("daemon.lock"))
 }
 
-/// Ensure the runtime directory exists with owner-only permissions, refusing a
-/// world-writable parent.
+/// Ensure the runtime directory exists with owner-only permissions. The directory
+/// that will contain the socket must not be world-writable.
 pub fn ensure_runtime_dir(dir: &Path) -> Result<(), DaemonError> {
-    if let Some(parent) = dir.parent()
-        && parent.exists()
-    {
-        check_not_world_writable(parent)?;
-    }
     if dir.exists() {
         check_not_world_writable(dir)?;
         let meta = fs::metadata(dir).map_err(|e| DaemonError::Internal {
@@ -60,17 +55,39 @@ pub fn ensure_runtime_dir(dir: &Path) -> Result<(), DaemonError> {
         }
         return Ok(());
     }
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .map_err(|e| DaemonError::Internal {
-            detail: format!("create runtime dir {}: {e}", dir.display()),
-        })?;
-    // Recheck parent after create — recursive create may have made parents.
-    if let Some(parent) = dir.parent() {
+    if let Some(parent) = dir.parent()
+        && parent.exists()
+    {
+        // Creating a new subdirectory under a world-writable parent is unsafe:
+        // another user can rename our directory out of the way.
         check_not_world_writable(parent)?;
     }
+    fs::DirBuilder::new().mode(0o700).create(dir).or_else(|e| {
+        // Parent may be missing — create with recursive only when parent is safe.
+        if e.kind() == std::io::ErrorKind::NotFound {
+            if let Some(parent) = dir.parent() {
+                fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(parent)
+                    .map_err(|e| DaemonError::Internal {
+                        detail: format!("create parent {}: {e}", parent.display()),
+                    })?;
+                // Re-check parent after create.
+                check_not_world_writable(parent)?;
+            }
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(dir)
+                .map_err(|e| DaemonError::Internal {
+                    detail: format!("create runtime dir {}: {e}", dir.display()),
+                })
+        } else {
+            Err(DaemonError::Internal {
+                detail: format!("create runtime dir {}: {e}", dir.display()),
+            })
+        }
+    })?;
     Ok(())
 }
 
@@ -205,10 +222,7 @@ mod tests {
         let err = ensure_runtime_dir(&nested).unwrap_err();
         match err {
             DaemonError::Internal { detail } => {
-                assert!(
-                    detail.contains("world-writable"),
-                    "detail={detail}"
-                );
+                assert!(detail.contains("world-writable"), "detail={detail}");
             }
             other => panic!("unexpected {other:?}"),
         }

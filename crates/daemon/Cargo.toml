@@ -21,10 +21,17 @@ tracing-subscriber = { workspace = true }
 fs4 = { workspace = true }
 thiserror = { workspace = true }
 blake3 = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+indexing = { path = "../indexing" }
 inference = { path = "../inference" }
+storage = { path = "../storage" }
+retrieval = { path = "../retrieval" }
+futures = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [[bin]]
 name = "sift-daemon"
