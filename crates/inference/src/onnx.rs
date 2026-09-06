@@ -224,7 +224,9 @@ impl Embedder for OnnxEmbedder {
 
     fn resource_usage(&self) -> crate::embedder::ResourceUsage {
         // Device 0 is the configured CUDA device for this embedder.
-        crate::nvml::sample_nvml(0)
+        let mut usage = crate::nvml::sample_nvml(0);
+        usage.execution_provider = Some("cuda".into());
+        usage
     }
 }
 

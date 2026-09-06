@@ -4,6 +4,9 @@ import {
   firstInvalidField,
   mapRepositoryError,
   freshnessLabel,
+  operationElapsed,
+  operationThroughput,
+  providerLabel,
 } from './repository-operations';
 
 describe('repository form contracts', () => {
@@ -18,6 +21,21 @@ describe('repository form contracts', () => {
       message: 'Already registered',
       values: input,
     });
+  });
+});
+
+describe('live operation formatting', () => {
+  test('elapsed time never runs backwards and throughput needs measurable progress', () => {
+    expect(operationElapsed(1_000, 500)).toBe(0);
+    expect(operationElapsed(1_000, 6_000)).toBe(5);
+    expect(operationThroughput(0, 5)).toBeNull();
+    expect(operationThroughput(100, 5)).toBe(20);
+  });
+
+  test('provider labels preserve unavailable telemetry', () => {
+    expect(providerLabel('cuda')).toBe('CUDA');
+    expect(providerLabel('cpu')).toBe('CPU');
+    expect(providerLabel(null)).toBe('Unavailable');
   });
 });
 

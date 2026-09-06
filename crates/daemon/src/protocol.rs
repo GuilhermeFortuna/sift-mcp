@@ -98,10 +98,14 @@ pub struct RequestEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResourceSnapshot {
     pub sampled_at_unix_ms: u64,
+    pub execution_provider: Option<String>,
     pub device_id: Option<String>,
+    pub device_name: Option<String>,
+    pub device_utilization_percent: Option<u8>,
     pub device_used_bytes: Option<u64>,
     pub device_total_bytes: Option<u64>,
     pub process_used_bytes: Option<u64>,
+    pub process_cpu_percent: Option<u8>,
     pub model_used_bytes: Option<u64>,
 }
 
@@ -109,10 +113,14 @@ impl ResourceSnapshot {
     pub fn unavailable(sampled_at_unix_ms: u64) -> Self {
         Self {
             sampled_at_unix_ms,
+            execution_provider: None,
             device_id: None,
+            device_name: None,
+            device_utilization_percent: None,
             device_used_bytes: None,
             device_total_bytes: None,
             process_used_bytes: None,
+            process_cpu_percent: None,
             model_used_bytes: None,
         }
     }

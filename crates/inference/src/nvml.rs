@@ -111,10 +111,14 @@ unsafe fn sample_nvml_inner(device_index: u32) -> ResourceUsage {
         let _ = dlclose(handle);
 
         ResourceUsage {
+            execution_provider: Some("cuda".into()),
             device_id: uuid,
+            device_name: None,
+            device_utilization_percent: None,
             device_used_bytes: used,
             device_total_bytes: total,
             process_used_bytes: None,
+            process_cpu_percent: None,
             model_used_bytes: None,
         }
     }

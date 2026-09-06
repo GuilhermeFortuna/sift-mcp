@@ -146,7 +146,12 @@ async fn concurrent_index_requests_create_only_one_running_job() {
             .iter()
             .filter(|s| **s == StatusCode::ACCEPTED)
             .count(),
-        1
+        1,
+        "first={:?} second={:?} values={:?} {:?}",
+        first.0,
+        second.0,
+        first.1,
+        second.1
     );
     assert_eq!(
         statuses
@@ -155,6 +160,12 @@ async fn concurrent_index_requests_create_only_one_running_job() {
             .count(),
         1
     );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        mock.index_started.notified(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         mock.requests
             .lock()
@@ -242,7 +253,7 @@ async fn protocol_mismatch_never_replaces_daemon() {
         }),
     )
     .await;
-    let (status, error) = request(
+    let (status, operation) = request(
         &app,
         "POST",
         &format!("/api/v1/repositories/{id}/start"),
@@ -250,7 +261,20 @@ async fn protocol_mismatch_never_replaces_daemon() {
         json!({}),
     )
     .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(error["code"], "protocol_incompatible");
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let job_path = format!("/api/v1/jobs/{}", operation["id"].as_str().unwrap());
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let (_, job) = request(&app, "GET", &job_path, &token, Value::Null).await;
+            if job["state"] != "queued" && job["state"] != "running" {
+                assert_eq!(job["state"], "failed");
+                assert_eq!(job["error_code"], "protocol_incompatible");
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert!(!sentinel.exists());
 }

@@ -85,6 +85,7 @@ pub async fn application(config: ConsoleConfig) -> Result<Router, Box<dyn std::e
         .route("/repositories/{id}/start", post(start_repository))
         .route("/repositories/{id}/index", post(index_repository))
         .route("/repositories/{id}/jobs", get(list_jobs))
+        .route("/repositories/{id}/events", get(operation_events))
         .route("/repositories/{id}/status", get(repository_status))
         .route("/repositories/{id}/freshness", get(freshness))
         .route("/repositories/{id}/search", post(search))
@@ -164,13 +165,9 @@ async fn ensure_idle(s: &AppState, id: &str) -> Result<(), ApiError> {
 async fn start_repository(
     State(s): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<daemon::DaemonStatus>, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     let r = s.db.get(&id).await?;
-    let mut c = crate::jobs::connect(&r).await?;
-    match c.request(daemon::Request::Status).await? {
-        daemon::Response::Status(v) => Ok(Json(v)),
-        _ => Err(unexpected()),
-    }
+    Ok((StatusCode::ACCEPTED, Json(s.jobs.launch_start(r).await?)))
 }
 async fn index_repository(
     State(s): State<Arc<AppState>>,
@@ -196,6 +193,19 @@ async fn get_job(
     Path(id): Path<String>,
 ) -> Result<Json<IndexJob>, ApiError> {
     Ok(Json(s.jobs.get(&id).await?))
+}
+async fn operation_events(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::api::types::OperationEvent>>, ApiError> {
+    s.db.get(&id).await?;
+    let jobs = s.jobs.list(&id).await;
+    let mut events = jobs
+        .into_iter()
+        .flat_map(|job| job.events)
+        .collect::<Vec<_>>();
+    events.sort_by_key(|event| event.at_unix_ms);
+    Ok(Json(events))
 }
 async fn freshness(
     State(s): State<Arc<AppState>>,
@@ -288,6 +298,7 @@ async fn events(
                 return Some((Ok(Event::default().event("reset").data("{}")), (rx, false)));
             }
             let event = match rx.recv().await {
+                Ok(kind) if kind.starts_with('{') => Event::default().event("operation").data(kind),
                 Ok(kind) => Event::default().event(kind).data("{}"),
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     Event::default().event("reset").data("{}")

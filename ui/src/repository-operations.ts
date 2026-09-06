@@ -31,3 +31,7 @@ export function formatBytes(value: number | null | undefined) {
 }
 
 export function formatTime(value: number | undefined) { return value ? new Date(value).toLocaleString() : 'Unavailable'; }
+
+export function operationElapsed(startedAt: number, now: number) { return Math.max(0, (now - startedAt) / 1000); }
+export function operationThroughput(done: number, elapsedSeconds: number) { return done > 0 && elapsedSeconds > 0 ? done / elapsedSeconds : null; }
+export function providerLabel(provider: 'cuda' | 'cpu' | null | undefined) { return provider === 'cuda' ? 'CUDA' : provider === 'cpu' ? 'CPU' : 'Unavailable'; }

@@ -266,10 +266,14 @@ impl SharedState {
             Instant::now(),
             ResourceSnapshot {
                 sampled_at_unix_ms: sampled_at,
+                execution_provider: usage.execution_provider,
                 device_id: usage.device_id,
+                device_name: usage.device_name,
+                device_utilization_percent: usage.device_utilization_percent,
                 device_used_bytes: usage.device_used_bytes,
                 device_total_bytes: usage.device_total_bytes,
                 process_used_bytes: usage.process_used_bytes,
+                process_cpu_percent: usage.process_cpu_percent,
                 model_used_bytes: usage.model_used_bytes,
             },
         );

@@ -13,7 +13,7 @@ pub struct ApiError {
     pub retryable: bool,
 }
 impl ApiError {
-    pub fn new(code: &str, message: &str, retryable: bool) -> Self {
+    pub fn new(code: &str, message: impl Into<String>, retryable: bool) -> Self {
         Self {
             code: code.into(),
             message: message.into(),
@@ -70,52 +70,57 @@ impl IntoResponse for ApiError {
 impl From<daemon::DaemonError> for ApiError {
     fn from(e: daemon::DaemonError) -> Self {
         use daemon::DaemonError::*;
-        let (code, message, retryable) = match e {
+        let (code, message, retryable): (&str, String, bool) = match e {
             ProtocolVersion { .. } => (
                 "protocol_incompatible",
-                "The configured daemon uses an incompatible protocol. It was not replaced.",
+                "The configured daemon uses an incompatible protocol. It was not replaced.".into(),
                 false,
             ),
-            Starting => ("starting", "The daemon is starting.", true),
+            Starting => ("starting", "The daemon is starting.".into(), true),
             IndexInProgress => (
                 "index_in_progress",
-                "An indexing operation is already running.",
+                "An indexing operation is already running.".into(),
                 true,
             ),
             SymbolNotFound { .. } => (
                 "symbol_not_found",
-                "The symbol was not found in the current index.",
+                "The symbol was not found in the current index.".into(),
                 false,
             ),
             SymbolAmbiguous { .. } => (
                 "symbol_ambiguous",
-                "The symbol is ambiguous; specify its qualified name.",
+                "The symbol is ambiguous; specify its qualified name.".into(),
                 false,
             ),
             StoreStale { .. } => (
                 "store_stale",
-                "The index is stale; explicitly index the registered repository.",
+                "The index is stale; explicitly index the registered repository.".into(),
                 false,
             ),
-            GpuUnavailable { .. } => ("gpu_unavailable", "Daemon inference is unavailable.", true),
+            GpuUnavailable { detail } => (
+                "gpu_unavailable",
+                format!("CUDA initialization failed: {detail}"),
+                true,
+            ),
             RequestTooLarge { .. } => (
                 "request_too_large",
-                "The request exceeds the daemon frame limit.",
+                "The request exceeds the daemon frame limit.".into(),
                 false,
             ),
             Malformed { .. } => (
                 "connection_lost",
-                "The daemon response was lost or invalid. The operation may still be running.",
+                "The daemon response was lost or invalid. The operation may still be running."
+                    .into(),
                 true,
             ),
-            Internal { .. } => (
+            Internal { detail } => (
                 "daemon_unavailable",
-                "Could not connect to or start the configured daemon.",
+                format!("Could not connect to or start the configured daemon: {detail}"),
                 true,
             ),
             ObserverForbidden { .. } => (
                 "forbidden",
-                "This operation is not allowed on an observer connection.",
+                "This operation is not allowed on an observer connection.".into(),
                 false,
             ),
         };
@@ -133,7 +138,7 @@ impl From<crate::db::DbError> for ApiError {
                 false,
             ),
             crate::db::DbError::Registry(e) => {
-                Self::new("invalid_registration", &e.to_string(), false)
+                Self::new("invalid_registration", e.to_string(), false)
             }
             _ => Self::database(),
         }
@@ -148,21 +153,75 @@ pub type ActivityPage = Page<crate::history::RequestEvent>;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
+    Queued,
     Running,
     Succeeded,
     Failed,
     Interrupted,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationType {
+    StartDaemon,
+    UpdateIndex,
+    FullRebuild,
+}
+fn default_operation_type() -> OperationType {
+    OperationType::UpdateIndex
+}
+fn default_phase() -> OperationPhase {
+    OperationPhase::Queued
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationPhase {
+    Queued,
+    SpawningDaemon,
+    WaitingForSocket,
+    Connecting,
+    InitializingCuda,
+    LoadingModel,
+    OpeningStore,
+    Ready,
+    Walking,
+    Parsing,
+    Embedding,
+    Storing,
+    Compacting,
+    Completed,
+    Failed,
+    Interrupted,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OperationEvent {
+    pub at_unix_ms: u64,
+    pub state: JobState,
+    pub phase: OperationPhase,
+    pub message: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IndexJob {
     pub id: String,
     pub repository_id: String,
     pub state: JobState,
+    #[serde(default = "default_operation_type")]
+    pub operation_type: OperationType,
+    #[serde(default = "default_phase")]
+    pub phase: OperationPhase,
     pub progress: Option<daemon::IndexPhase>,
     pub done: u64,
     pub total: Option<u64>,
     pub report: Option<daemon::IndexReportWire>,
     pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub daemon_instance_id: Option<String>,
+    #[serde(default)]
+    pub started_at_unix_ms: u64,
+    #[serde(default)]
+    pub updated_at_unix_ms: u64,
+    pub completed_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub events: Vec<OperationEvent>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

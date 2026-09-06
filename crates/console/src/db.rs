@@ -76,7 +76,7 @@ impl Database {
         conn.execute("INSERT INTO collection_gaps(repository_id,from_unix_ms,to_unix_ms,reason) SELECT repository_id,MIN(observed_at_unix_ms,?1),?1,'console_restart' FROM collector_cursors",[now])?;
         crate::history::prune(&conn, now)?;
         conn.execute(
-            "UPDATE jobs SET state='interrupted' WHERE state='running'",
+            "UPDATE jobs SET state='interrupted' WHERE state IN ('running','queued')",
             [],
         )?;
         let (sender, receiver) = mpsc::channel::<Work>();
