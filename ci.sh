@@ -22,3 +22,7 @@ cargo check -p eval --features cuda --example proxy_kpi
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --workspace --release
+pnpm --dir ui install --frozen-lockfile
+pnpm --dir ui typecheck
+pnpm --dir ui test
+pnpm --dir ui build

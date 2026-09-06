@@ -1,0 +1,3 @@
+let csrf = '';
+export async function session(): Promise<void> { const response = await fetch('/api/v1/session'); csrf = (await response.json()).csrf_token; }
+export async function api<T>(path: string, init: RequestInit = {}): Promise<T> { const headers = new Headers(init.headers); if (init.method && init.method !== 'GET') { headers.set('content-type', 'application/json'); headers.set('X-Sift-CSRF', csrf); } const response = await fetch(`/api/v1${path}`, { ...init, headers }); if (!response.ok) throw await response.json(); return response.json() as Promise<T>; }
