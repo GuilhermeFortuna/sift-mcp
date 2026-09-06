@@ -99,7 +99,8 @@ crates/
 ├── inference/         # ort session management, pooling, batching
 ├── storage/           # sqlite + memmap
 ├── change-intel/      # static graph (primary), semantic fallback
-└── eval/              # git-mined labels, metrics, latency reports
+├── eval/              # git-mined labels, metrics, latency reports
+└── console/           # loopback console API, persistent metadata, and bundled UI assets
 tools/
 └── export_model.py
 ```
