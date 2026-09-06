@@ -1,0 +1,5 @@
+# Run CI with multiple workers
+CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 ./ci.sh
+
+# Start UI
+cargo run --release -p console --bin sift-console
