@@ -3,6 +3,9 @@
 *.onnx
 /index/
 /store/
+/.sift-store/
+/console.lock
+/console.sqlite3*
 /.ort/
 /onnxruntime/
 /tools/.venv/

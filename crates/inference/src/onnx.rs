@@ -14,6 +14,10 @@ use crate::metadata::{ModelMetadata, Normalize};
 use crate::pooling::{l2_normalize_rows, pool};
 use crate::tokenize::TextTokenizer;
 
+fn cuda_execution_provider() -> ort::ep::ExecutionProviderDispatch {
+    CUDA::default().build().error_on_failure()
+}
+
 pub struct OnnxEmbedder {
     session: Mutex<Session>,
     tokenizer: TextTokenizer,
@@ -30,7 +34,7 @@ impl OnnxEmbedder {
 
         let mut builder = Session::builder()
             .map_err(|e| InferError::Runtime(e.to_string()))?
-            .with_execution_providers([CUDA::default().build()])
+            .with_execution_providers([cuda_execution_provider()])
             .map_err(|e| InferError::GpuUnavailable {
                 detail: e.to_string(),
             })?;
@@ -67,7 +71,10 @@ impl OnnxEmbedder {
 
         let mut builder = Session::builder()
             .map_err(|e| InferError::Runtime(e.to_string()))?
-            .with_execution_providers([CUDA::default().with_device_id(99_999).build()])
+            .with_execution_providers([CUDA::default()
+                .with_device_id(99_999)
+                .build()
+                .error_on_failure()])
             .map_err(|e| InferError::GpuUnavailable {
                 detail: e.to_string(),
             })?;
@@ -229,6 +236,12 @@ mod tests {
 
     fn model_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/primary")
+    }
+
+    #[test]
+    fn cuda_provider_registration_is_fail_fast() {
+        let debug = format!("{:?}", cuda_execution_provider());
+        assert!(debug.contains("error_on_failure: true"), "{debug}");
     }
 
     fn cosine_distance(a: &[f16], b: &[f64]) -> f64 {
