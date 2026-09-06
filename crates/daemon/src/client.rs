@@ -9,6 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::process::Command;
 
+const MAX_STARTUP_STDERR_BYTES: usize = 64 * 1024;
+
 use crate::codec::encode;
 use crate::paths::socket_path_for_store;
 use crate::protocol::{
@@ -82,12 +84,19 @@ impl DaemonClient {
     ) -> Result<Self, DaemonError> {
         let socket = socket_path_for_store(store_dir)?;
         let start = Instant::now();
-        let mut spawned = false;
+        let mut child: Option<tokio::process::Child> = None;
+        let mut stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>> = None;
         loop {
             if UnixStream::connect(&socket).await.is_ok() {
+                if let (Some(mut child), Some(stderr_task)) = (child.take(), stderr_task.take()) {
+                    tokio::spawn(async move {
+                        let _ = child.wait().await;
+                        let _ = stderr_task.await;
+                    });
+                }
                 return Self::connect(&socket).await;
             }
-            if !spawned {
+            if child.is_none() {
                 let mut cmd = Command::new(binary);
                 cmd.arg("--store")
                     .arg(store_dir)
@@ -99,11 +108,49 @@ impl DaemonClient {
                     .arg(&socket)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
-                    .stderr(Stdio::null());
-                cmd.spawn().map_err(|e| DaemonError::Internal {
+                    .stderr(Stdio::piped());
+                let mut spawned = cmd.spawn().map_err(|e| DaemonError::Internal {
                     detail: format!("spawn daemon: {e}"),
                 })?;
-                spawned = true;
+                let mut stderr = spawned.stderr.take().ok_or_else(|| DaemonError::Internal {
+                    detail: "spawn daemon: stderr pipe unavailable".into(),
+                })?;
+                let reader_task = tokio::spawn(async move {
+                    let mut captured = Vec::new();
+                    let mut buffer = [0u8; 4096];
+                    loop {
+                        let read = match stderr.read(&mut buffer).await {
+                            Ok(0) => break,
+                            Ok(read) => read,
+                            Err(_) => break,
+                        };
+                        if captured.len() < MAX_STARTUP_STDERR_BYTES {
+                            let remaining = MAX_STARTUP_STDERR_BYTES - captured.len();
+                            captured.extend_from_slice(&buffer[..read.min(remaining)]);
+                        }
+                    }
+                    captured
+                });
+                child = Some(spawned);
+                stderr_task = Some(reader_task);
+            }
+            if let Some(child) = child.as_mut()
+                && let Some(status) = child.try_wait().map_err(|e| DaemonError::Internal {
+                    detail: format!("wait for daemon: {e}"),
+                })?
+            {
+                let stderr = match stderr_task.take() {
+                    Some(task) => task
+                        .await
+                        .ok()
+                        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
+                        .filter(|text| !text.is_empty()),
+                    None => None,
+                };
+                let diagnostic = stderr.map(|text| format!(": {text}")).unwrap_or_default();
+                return Err(DaemonError::Internal {
+                    detail: format!("daemon exited with {status}{diagnostic}"),
+                });
             }
             if start.elapsed() >= deadline {
                 return Err(DaemonError::Internal {

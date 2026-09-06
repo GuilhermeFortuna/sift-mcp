@@ -278,3 +278,50 @@ async fn protocol_mismatch_never_replaces_daemon() {
     .unwrap();
     assert!(!sentinel.exists());
 }
+
+#[tokio::test]
+async fn daemon_start_failure_finishes_with_child_diagnostic() {
+    let (_t, app, token, r) = setup().await;
+    let id = r["id"].as_str().unwrap();
+    std::fs::write(
+        r["config"]["daemon_path"].as_str().unwrap(),
+        "#!/bin/sh\nprintf '%s\\n' 'CUDA provider failed: libcublasLt.so.13' >&2\nexit 17\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(
+        r["config"]["daemon_path"].as_str().unwrap(),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+
+    let (status, operation) = request(
+        &app,
+        "POST",
+        &format!("/api/v1/repositories/{id}/start"),
+        &token,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let job_path = format!("/api/v1/jobs/{}", operation["id"].as_str().unwrap());
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let (_, job) = request(&app, "GET", &job_path, &token, Value::Null).await;
+            if job["state"] == "failed" {
+                assert_eq!(job["phase"], "failed");
+                assert!(
+                    job["error_message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("libcublasLt.so.13"),
+                    "{job}"
+                );
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}

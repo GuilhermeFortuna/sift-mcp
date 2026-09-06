@@ -173,6 +173,38 @@ async fn wait_ready(socket: &Path) {
 }
 
 #[tokio::test]
+async fn connect_or_spawn_reports_stderr_when_daemon_exits_before_socket() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let t = tempfile::tempdir().unwrap();
+    let daemon = t.path().join("daemon");
+    std::fs::write(
+        &daemon,
+        "#!/bin/sh\nprintf '%s\\n' 'CUDA provider failed: libcublasLt.so.13' >&2\nexit 17\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&daemon, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let store = t.path().join("store");
+    let repo = t.path().join("repo");
+    let model = t.path().join("model");
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::create_dir(&model).unwrap();
+
+    let result =
+        DaemonClient::connect_or_spawn(&store, &repo, &model, Duration::from_secs(2), &daemon)
+            .await;
+
+    match result {
+        Err(DaemonError::Internal { detail }) => {
+            assert!(detail.contains("exited"), "{detail}");
+            assert!(detail.contains("libcublasLt.so.13"), "{detail}");
+        }
+        Ok(_) => panic!("expected actionable child-exit error, got success"),
+        Err(other) => panic!("expected internal child-exit error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn search_over_socket_matches_in_process() {
     let h = Harness::new();
 

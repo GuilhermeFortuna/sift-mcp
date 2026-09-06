@@ -14,6 +14,10 @@ set -euo pipefail
 : "${CARGO_PROFILE_TEST_DEBUG:=0}"
 export CARGO_BUILD_JOBS RUST_TEST_THREADS
 export CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG
+# Sift's production runtime targets CUDA 12.x. ort-sys uses this to select its
+# CUDA 12 ONNX Runtime distribution deterministically on machines with multiple
+# CUDA toolkits or incomplete version metadata.
+export ORT_CUDA_VERSION=12
 
 cargo fmt --all -- --check
 cargo check -p daemon --features cuda --bin sift-daemon

@@ -158,12 +158,14 @@ cargo run -p mcp-client -- --print-tool-descriptions
 
 The production daemon uses the optional `cuda` feature and an exported fp16
 ONNX embedding model. CUDA is isolated behind the `inference` crate; it is not
-needed by the default build.
+needed by the default build. The Rust runtime pins `ort` to the CUDA-12-capable
+`2.0.0-rc.12` release (ONNX Runtime 1.24.2); CUDA 13-only `ort` releases are
+not compatible with this baseline.
 
 ```bash
 # Build the thin client and the CUDA daemon separately.
 cargo build --release -p mcp-client
-cargo build --release -p daemon --bin sift-daemon --features cuda
+ORT_CUDA_VERSION=12 cargo build --release -p daemon --bin sift-daemon --features cuda
 
 # Export a pinned model into models/<key>/.
 python3 -m venv tools/.venv
@@ -171,6 +173,13 @@ tools/.venv/bin/pip install -r tools/requirements.txt
 tools/.venv/bin/python tools/export_model.py --model primary
 tools/.venv/bin/python tools/verify_export.py --model primary --report-vram
 ```
+
+The CUDA build requires a working CUDA 12.x installation and matching runtime
+libraries visible to the daemon, including cuDNN 9 for the selected ONNX Runtime
+CUDA 12 build. Set `ORT_CUDA_VERSION=12` when building
+on a host with multiple CUDA toolkits or when CUDA version detection is
+ambiguous. The daemon registers only the CUDA execution provider and fails
+startup if it cannot initialize; it does not fall back to CPU.
 
 The primary model is Qwen3-Embedding-0.6B (1024 dimensions); the fallback is
 `jina-embeddings-v2-base-code` (768 dimensions). Both use 512-token inputs and
