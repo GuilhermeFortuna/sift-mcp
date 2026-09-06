@@ -17,6 +17,7 @@ members = [
   "crates/storage",
   "crates/change-intel",
   "crates/eval",
+  "crates/console",
 ]
 resolver = "3"
 
@@ -64,3 +65,9 @@ futures = "0.3"
 parking_lot = "0.12"
 rmcp = { version = "3.2", features = ["server", "macros", "transport-io", "schemars", "client"] }
 toml = "0.8"
+axum = "0.8"
+tower = "0.5"
+uuid = { version = "1", features = ["v4", "serde"] }
+rand = "0.9"
+tokio-stream = "0.1"
+http = "1"
