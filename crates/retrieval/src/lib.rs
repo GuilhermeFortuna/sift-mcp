@@ -24,6 +24,8 @@ pub use error::RetrievalError;
 #[cfg(feature = "engine")]
 pub use fusion::{Contribution, FusedRow, FusionConfig, fuse};
 #[cfg(feature = "engine")]
+pub use half::f16;
+#[cfg(feature = "engine")]
 pub use lexical::{LexicalDoc, LexicalIndex, LexicalSearchHandle, ScoredRow};
 #[cfg(feature = "engine")]
-pub use search::Searcher;
+pub use search::{SearchBackend, Searcher};

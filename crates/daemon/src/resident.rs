@@ -1,20 +1,18 @@
 //! Resident model/index state and prepare-then-swap indexing.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use indexing::{IndexConfig, IndexReport, Indexer, Phase, Progress};
-use inference::{Embedder, InferError, Role};
+use inference::{Embedder, InferError};
 use parking_lot::Mutex as ParkingMutex;
 use retrieval::dense::{DenseBackend, DenseIndex, LiveMask};
-use retrieval::fusion::{FusionConfig, fuse};
+use retrieval::fusion::FusionConfig;
 use retrieval::lexical::{LexicalIndex, LexicalSearchHandle};
-use retrieval::result::preview_from_body;
-use retrieval::{SearchDiagnostics, SearchResponse, SearchResult, Searcher, StageTimings};
-use storage::{ChunkRecord, ChunkStore, Integrity, RowId, SCHEMA_VERSION};
+use retrieval::{ScoredRow, SearchBackend, SearchResponse, Searcher};
+use storage::{ChunkRecord, ChunkStore, Integrity, RowId, SCHEMA_VERSION, SnapshotReader};
 
 use crate::observe::EventRing;
 use crate::protocol::{
@@ -91,14 +89,43 @@ fn dense_backend() -> DenseBackend {
 pub struct FrozenSearch {
     dense: DenseIndex,
     lexical: LexicalSearchHandle,
-    records: HashMap<u64, ChunkRecord>,
-    bodies: HashMap<u64, String>,
+    metadata: SnapshotReader,
     embedder: Arc<dyn Embedder>,
     identity: StoreIdentity,
     pub model_id: String,
     pub chunks_live: u64,
     pub chunks_dead: u64,
     pub indexed_commit: Option<String>,
+}
+
+impl SearchBackend for FrozenSearch {
+    fn lexical_search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ScoredRow>, retrieval::RetrievalError> {
+        self.lexical.search(query, limit)
+    }
+
+    fn dense_search(
+        &self,
+        query: &[retrieval::f16],
+        model_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ScoredRow>, retrieval::RetrievalError> {
+        self.dense.search(query, model_id, limit)
+    }
+
+    fn records(
+        &self,
+        rows: &[RowId],
+    ) -> Result<Vec<Option<ChunkRecord>>, retrieval::RetrievalError> {
+        Ok(self.metadata.get_many(rows)?)
+    }
+
+    fn bodies(&self, rows: &[RowId]) -> Result<Vec<Option<String>>, retrieval::RetrievalError> {
+        self.lexical.bodies(rows)
+    }
 }
 
 /// Ready-state ownership split between immutable search data and the single
@@ -470,40 +497,18 @@ fn freeze_search(
         detail: format!("stats: {e}"),
     })?;
     let indexed_commit = store.indexed_commit().ok().flatten();
-    let live_rows = store.live_rows().map_err(|e| DaemonError::Internal {
-        detail: format!("live_rows: {e}"),
+    let metadata = SnapshotReader::open(store.dir()).map_err(|e| DaemonError::Internal {
+        detail: format!("snapshot metadata reader: {e}"),
     })?;
-    let got = store
-        .get_many(&live_rows)
-        .map_err(|e| DaemonError::Internal {
-            detail: format!("get_many: {e}"),
-        })?;
     let frozen_lexical = lexical
         .frozen_search_handle()
         .map_err(|e| DaemonError::Internal {
             detail: format!("frozen lexical reader: {e}"),
         })?;
-    let body_list = frozen_lexical
-        .bodies(&live_rows)
-        .map_err(|e| DaemonError::Internal {
-            detail: format!("bodies: {e}"),
-        })?;
-    let mut records = HashMap::new();
-    let mut bodies = HashMap::new();
-    for ((row, rec), body) in live_rows.iter().zip(got).zip(body_list) {
-        if let Some(rec) = rec {
-            let id = row.get();
-            if let Some(b) = body {
-                bodies.insert(id, b);
-            }
-            records.insert(id, rec);
-        }
-    }
     Ok(FrozenSearch {
         dense,
         lexical: frozen_lexical,
-        records,
-        bodies,
+        metadata,
         model_id: embedder.model_id().to_owned(),
         embedder,
         identity,
@@ -529,6 +534,23 @@ pub fn split_for_index(ready: ReadyResident) -> Result<IndexParts, DaemonError> 
         parts.repo_dir,
         parts.embedder,
     ))
+}
+
+pub fn restore_after_failed_refresh(
+    snapshot: Arc<FrozenSearch>,
+    repo_dir: PathBuf,
+    embedder: Arc<dyn Embedder>,
+) -> Result<ReadyResident, DaemonError> {
+    let resident = Resident::load(&snapshot.identity.canonical_path, &repo_dir, embedder)?;
+    Ok(ReadyResident {
+        search: snapshot,
+        parts: Mutex::new(ResidentParts {
+            store: resident.store,
+            lexical: resident.lexical,
+            embedder: resident.embedder,
+            repo_dir: resident.repo_dir,
+        }),
+    })
 }
 
 pub fn rebuild_resident(
@@ -568,18 +590,9 @@ impl FrozenSearch {
         fusion: &FusionConfig,
     ) -> Result<SearchResponse, DaemonError> {
         self.identity.check_still_valid()?;
-        search_with_parts(
-            self.embedder.as_ref(),
-            &self.lexical,
-            &self.dense,
-            &self.records,
-            &self.bodies,
-            query,
-            top_k,
-            fusion,
-            Role::Query,
-            true,
-        )
+        Searcher::from_backend(self, self.embedder.as_ref())
+            .search(query, top_k, fusion)
+            .map_err(map_retrieval_err)
     }
 
     pub fn search_similar(
@@ -589,27 +602,29 @@ impl FrozenSearch {
         fusion: &FusionConfig,
     ) -> Result<SearchResponse, DaemonError> {
         self.identity.check_still_valid()?;
-        search_with_parts(
-            self.embedder.as_ref(),
-            &self.lexical,
-            &self.dense,
-            &self.records,
-            &self.bodies,
-            code,
-            top_k,
-            fusion,
-            Role::Document,
-            false,
-        )
+        Searcher::from_backend(self, self.embedder.as_ref())
+            .search_similar(code, top_k, fusion)
+            .map_err(map_retrieval_err)
     }
 
     pub fn get_symbol(&self, file: &str, symbol: &str) -> Result<Response, DaemonError> {
         self.identity.check_still_valid()?;
-        let matches: Vec<(u64, &ChunkRecord)> = self
-            .records
-            .iter()
-            .filter(|(_, r)| r.file == file && r.symbol == symbol)
-            .map(|(id, r)| (*id, r))
+        let rows = self
+            .metadata
+            .rows_for_file(file)
+            .map_err(|e| DaemonError::Internal {
+                detail: format!("rows_for_file: {e}"),
+            })?;
+        let records = self
+            .metadata
+            .get_many(&rows)
+            .map_err(|e| DaemonError::Internal {
+                detail: format!("get_many: {e}"),
+            })?;
+        let matches: Vec<(RowId, ChunkRecord)> = rows
+            .into_iter()
+            .zip(records)
+            .filter_map(|(row, rec)| rec.filter(|r| r.symbol == symbol).map(|r| (row, r)))
             .collect();
         match matches.len() {
             0 => Err(DaemonError::SymbolNotFound {
@@ -617,8 +632,15 @@ impl FrozenSearch {
                 symbol: symbol.into(),
             }),
             1 => {
-                let (row, rec) = matches[0];
-                let body = self.bodies.get(&row).cloned().unwrap_or_default();
+                let (row, rec) = &matches[0];
+                let body = self
+                    .lexical
+                    .bodies(&[*row])
+                    .map_err(map_retrieval_err)?
+                    .into_iter()
+                    .next()
+                    .flatten()
+                    .unwrap_or_default();
                 Ok(Response::Symbol {
                     file: rec.file.clone(),
                     symbol: rec.symbol.clone(),
@@ -641,89 +663,6 @@ impl FrozenSearch {
             }
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn search_with_parts(
-    embedder: &dyn Embedder,
-    lexical: &LexicalSearchHandle,
-    dense: &DenseIndex,
-    records: &HashMap<u64, ChunkRecord>,
-    bodies: &HashMap<u64, String>,
-    text: &str,
-    top_k: usize,
-    fusion: &FusionConfig,
-    role: Role,
-    run_lexical: bool,
-) -> Result<SearchResponse, DaemonError> {
-    let total = Instant::now();
-    let embed_started = Instant::now();
-    let embedded = embedder.embed(&[text], role).map_err(map_infer_err)?;
-    let embed_millis = embed_started.elapsed().as_millis() as u64;
-    let vector = &embedded[0].vector;
-
-    let (lexical_rows, lexical_error, lexical_millis) = if run_lexical {
-        let lex_started = Instant::now();
-        let (rows, error) = match lexical.search(text, fusion.lexical_depth) {
-            Ok(rows) => (rows, None),
-            Err(e) => (Vec::new(), Some(e.to_string())),
-        };
-        (rows, error, lex_started.elapsed().as_millis() as u64)
-    } else {
-        (Vec::new(), None, 0)
-    };
-
-    let dense_started = Instant::now();
-    let (dense_rows, dense_error) =
-        match dense.search(vector, embedder.model_id(), fusion.dense_depth) {
-            Ok(rows) => (rows, None),
-            Err(e) => (Vec::new(), Some(e.to_string())),
-        };
-    let dense_millis = dense_started.elapsed().as_millis() as u64;
-
-    let fuse_started = Instant::now();
-    let fused = fuse(&lexical_rows, &dense_rows, fusion);
-    let fuse_millis = fuse_started.elapsed().as_millis() as u64;
-
-    let assemble_started = Instant::now();
-    let mut results = Vec::new();
-    for row in fused.into_iter().take(top_k) {
-        let id = row.row.get();
-        let Some(record) = records.get(&id) else {
-            continue;
-        };
-        let body = bodies.get(&id).map(String::as_str).unwrap_or("");
-        results.push(SearchResult {
-            file: record.file.clone(),
-            symbol: record.symbol.clone(),
-            signature: record.signature.clone(),
-            doc: record.doc_first_line.clone(),
-            preview: preview_from_body(body),
-            lines: [record.line_start, record.line_end],
-            lexical_score: row.lexical.score,
-            dense_score: row.dense.score,
-            fused_score: row.fused_score,
-        });
-    }
-    let assemble_millis = assemble_started.elapsed().as_millis() as u64;
-
-    Ok(SearchResponse {
-        results,
-        diagnostics: SearchDiagnostics {
-            lexical_ok: lexical_error.is_none(),
-            dense_ok: dense_error.is_none(),
-            lexical_error,
-            dense_error,
-            stage_millis: StageTimings {
-                embed: embed_millis,
-                lexical: lexical_millis,
-                dense: dense_millis,
-                fuse: fuse_millis,
-                assemble: assemble_millis,
-                total: total.elapsed().as_millis() as u64,
-            },
-        },
-    })
 }
 
 pub fn resolve_symbol(

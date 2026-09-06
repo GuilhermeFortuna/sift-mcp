@@ -23,7 +23,7 @@ use crate::paths::{
 use crate::protocol::{ClientRole, DaemonError, Envelope, IndexMode, Request, Response};
 use crate::resident::{
     ProgressForwarder, Resident, ServingState, SharedState, index_report_response,
-    rebuild_resident, run_index, split_for_index,
+    rebuild_resident, restore_after_failed_refresh, run_index, split_for_index,
 };
 
 /// How long a connection may sit before completing Hello.
@@ -821,6 +821,7 @@ async fn dispatch_request(
                     }
                 };
                 let (frozen, store, lexical, _resident_repo_dir, embedder) = split;
+                let old_snapshot = Arc::clone(&frozen);
                 *state_c.serving.write().unwrap() = ServingState::Indexing(frozen);
 
                 if let Some(d) = delay {
@@ -835,7 +836,12 @@ async fn dispatch_request(
                 let result = run_index(store, embedder.as_ref(), &repo_dir, full, &mut progress);
                 match result {
                     Ok((store, lexical, report)) => {
-                        match rebuild_resident(store, lexical, embedder, repo_dir) {
+                        match rebuild_resident(
+                            store,
+                            lexical,
+                            Arc::clone(&embedder),
+                            repo_dir.clone(),
+                        ) {
                             Ok(resident) => match resident.into_ready() {
                                 Ok(ready) => {
                                     *state_c.serving.write().unwrap() =
@@ -844,23 +850,44 @@ async fn dispatch_request(
                                     let _ = done_tx.send(Ok(report));
                                 }
                                 Err(e) => {
-                                    *state_c.serving.write().unwrap() =
-                                        ServingState::Stale(format!("snapshot: {e:?}"));
+                                    let fallback = restore_after_failed_refresh(
+                                        Arc::clone(&old_snapshot),
+                                        repo_dir.clone(),
+                                        Arc::clone(&embedder),
+                                    )
+                                    .map(Arc::new)
+                                    .map(ServingState::Ready)
+                                    .unwrap_or_else(|_| ServingState::Indexing(old_snapshot));
+                                    *state_c.serving.write().unwrap() = fallback;
                                     clear_indexing();
                                     let _ = done_tx.send(Err(e));
                                 }
                             },
                             Err(e) => {
-                                *state_c.serving.write().unwrap() =
-                                    ServingState::Stale(format!("rebuild: {e:?}"));
+                                let fallback = restore_after_failed_refresh(
+                                    Arc::clone(&old_snapshot),
+                                    repo_dir.clone(),
+                                    Arc::clone(&embedder),
+                                )
+                                .map(Arc::new)
+                                .map(ServingState::Ready)
+                                .unwrap_or_else(|_| ServingState::Indexing(old_snapshot));
+                                *state_c.serving.write().unwrap() = fallback;
                                 clear_indexing();
                                 let _ = done_tx.send(Err(e));
                             }
                         }
                     }
                     Err(e) => {
-                        *state_c.serving.write().unwrap() =
-                            ServingState::Stale(format!("index: {e:?}"));
+                        let fallback = restore_after_failed_refresh(
+                            Arc::clone(&old_snapshot),
+                            repo_dir.clone(),
+                            Arc::clone(&embedder),
+                        )
+                        .map(Arc::new)
+                        .map(ServingState::Ready)
+                        .unwrap_or(ServingState::Indexing(old_snapshot));
+                        *state_c.serving.write().unwrap() = fallback;
                         clear_indexing();
                         let _ = done_tx.send(Err(e));
                     }

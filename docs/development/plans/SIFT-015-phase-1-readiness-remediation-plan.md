@@ -6,44 +6,52 @@
 
 ## Interfaces produced
 
-This task does not add a public service API. It tightens backend feature
-selection, resident ownership, indexing reconciliation, publication recovery,
-and the evaluator's runtime contract.
+This task does not change the MCP wire API. It adds a shared retrieval backend
+boundary and snapshot-bound read interfaces used by both evaluator and daemon
+search, while retaining the existing model and dense-search feature boundaries.
 
 ## Ordered implementation
 
-1. Create the branch `SIFT-015-phase-1-readiness-remediation` and register the
-   corrective task in the authoritative status table.
-2. Add failing regression coverage for real-model evaluation configuration,
-   CUDA retrieval selection, duplicate-content locations, full and dirty
-   reconciliation, concurrent normal searches, and store/lexical recovery.
-   Confirm the relevant failures before implementation.
-3. Implement the evaluator and daemon CUDA feature wiring, retaining the CPU
-   default for ordinary host validation.
-4. Implement immutable ready-state search snapshots and keep mutable indexing
-   ownership separate from normal search requests.
-5. Reconcile absent and unreadable paths, and preserve one metadata row per
-   content occurrence while reusing one embedding per unique content hash.
-6. Add the durable publication journal and recovery path around store and
-   lexical mutations, including compaction renumbering.
-7. Restore the dependency-consistent task statuses and run bounded targeted
-   validation for the affected crates and feature combinations.
-8. Report the remaining target-GPU and SIFT-013 human evidence without marking
-   those measurements complete.
+1. Add failing focused tests for shared production/evaluator search semantics,
+   all retriever failure combinations, generation-consistent snapshot reads,
+   failed-refresh retention, publication recovery, and embedding reuse across
+   flush batches. Confirm each relevant failure before implementation.
+2. Move embedding, lexical/dense dispatch, failure classification, RRF fusion,
+   diagnostics, and result assembly into one retrieval pipeline. Adapt both
+   evaluator indexes and daemon snapshots to it, and remove daemon-local
+   `search_with_parts`.
+3. Remove per-request scoped thread spawning. Execute lexical and dense paths
+   sequentially inside the daemon's existing bounded `spawn_blocking` worker.
+4. Replace resident record/body maps with a logical immutable `FrozenSearch`
+   snapshot containing dense state, a frozen Tantivy generation, snapshot-bound
+   SQLite read connections/transactions, model identity, and counters.
+5. Keep indexing on the writable store/index without mutating the currently
+   served logical snapshot. After store and lexical publication, build and
+   validate replacement dense, Tantivy, and SQLite readers, then atomically swap
+   the serving `Arc`. Keep the old snapshot serving if refresh fails.
+6. Preserve on-demand body/snippet reads from the matching frozen Tantivy
+   generation and on-demand metadata reads from snapshot-bound SQLite readers.
+   Add the operation-wide content-hash embedding cache if tests show reuse is
+   only batch-local; retain one row/location per occurrence.
+7. Run focused CPU tests and CUDA compile checks, then broader affected-crate
+   tests. Do not run long acceptance, mined-evaluation, or benchmark workloads.
+8. Update only SIFT-015 documentation/status as justified by implemented and
+   verified behavior; preserve all unrelated UI statuses and do not claim
+   human/GPU acceptance.
 
 ## Validation
 
-- Format the workspace.
-- Compile the affected CPU crates with one Cargo build job.
-- Compile the evaluator and daemon CUDA feature targets with one Cargo build
-  job; do not run them without the required model/GPU assets.
-- Run storage, indexing, and daemon tests with one build job and one test
-  thread.
-- Do not claim SIFT-013 acceptance from these checks.
+- Use `CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1` for focused and crate tests.
+- Run retrieval, daemon, and indexing tests, including their new focused tests.
+- Compile `daemon`'s CUDA binary and the CUDA evaluator example without
+  executing them.
+- Run short live daemon checks with a small repository where practical.
+- Do not run Phase 1 acceptance, git-mined evaluation, benchmark suites, or
+  long resource/latency runs.
 
 ## Handoff
 
-Report the corrected evaluator invocation, CUDA feature wiring, reconciliation
-and duplicate-location guarantees, serving/publication recovery behavior, the
-bounded validation commands and results, and the outstanding human acceptance
-measurements.
+Report files changed, root causes fixed, the shared-pipeline and snapshot
+architecture, duplicate-content reuse evidence, focused/live tests, exact
+commands, failures, branch-control limitations, and any technically unresolved
+items. Human/GPU acceptance remains outstanding.

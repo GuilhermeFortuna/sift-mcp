@@ -5,6 +5,7 @@ use half::f16;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// Metadata schema version. Independent of the matrix format version.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -52,6 +53,65 @@ pub struct ChunkStore {
     statements_prepared: std::cell::Cell<u64>,
     /// Test hook: fail before committing insert_batch when set.
     fail_before_commit: bool,
+}
+
+/// A read-only SQLite view pinned to the active database file and a single
+/// read transaction. It remains tied to that publication even if a later
+/// store publication changes the directory manifest.
+pub struct SnapshotReader {
+    conn: Mutex<Connection>,
+}
+
+impl SnapshotReader {
+    pub fn open(dir: &Path) -> Result<Self, StoreError> {
+        let (db_path, _) = active_paths(dir)?;
+        let conn =
+            Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.execute_batch(
+            "PRAGMA query_only=ON;
+             PRAGMA busy_timeout=5000;
+             BEGIN;",
+        )?;
+        let _: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    pub fn get_many(&self, rows: &[RowId]) -> Result<Vec<Option<ChunkRecord>>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Io(std::io::Error::other("snapshot reader lock poisoned")))?;
+        let mut stmt = conn.prepare(
+            "SELECT repository, file, language, symbol, symbol_type, signature,
+                    doc_first_line, line_start, line_end, content_hash
+             FROM chunks WHERE rowid = ?1 AND live = 1",
+        )?;
+        rows.iter()
+            .map(|row| {
+                stmt.query_row(params![row.get() as i64], row_to_record)
+                    .optional()
+                    .map_err(StoreError::from)
+            })
+            .collect()
+    }
+
+    pub fn rows_for_file(&self, file: &str) -> Result<Vec<RowId>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Io(std::io::Error::other("snapshot reader lock poisoned")))?;
+        let mut stmt =
+            conn.prepare("SELECT rowid FROM chunks WHERE file = ?1 AND live = 1 ORDER BY rowid")?;
+        let rows = stmt
+            .query_map(params![file], |r| {
+                let id: i64 = r.get(0)?;
+                Ok(RowId::new(id as u64))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
 }
 
 impl std::fmt::Debug for ChunkStore {

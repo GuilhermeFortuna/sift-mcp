@@ -211,6 +211,16 @@ async fn search_over_socket_matches_in_process() {
     match resp {
         Response::Search(got) => {
             assert_eq!(got.results.len(), expected.results.len());
+            assert_eq!(got.diagnostics.lexical_ok, expected.diagnostics.lexical_ok);
+            assert_eq!(got.diagnostics.dense_ok, expected.diagnostics.dense_ok);
+            assert_eq!(
+                got.diagnostics.lexical_error,
+                expected.diagnostics.lexical_error
+            );
+            assert_eq!(
+                got.diagnostics.dense_error,
+                expected.diagnostics.dense_error
+            );
             for (a, b) in got.results.iter().zip(expected.results.iter()) {
                 assert_eq!(a.symbol, b.symbol);
                 assert_eq!(a.file, b.file);
@@ -527,6 +537,44 @@ async fn search_during_index_stays_consistent() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[tokio::test]
+async fn failed_refresh_keeps_previous_snapshot_serving() {
+    let h = Harness::new();
+    let daemon = h.start().await;
+    let socket = h.socket.clone();
+    tokio::spawn(async move {
+        let _ = daemon.serve().await;
+    });
+    wait_ready(&socket).await;
+
+    let mut client = DaemonClient::connect(&socket).await.unwrap();
+    let stream = client
+        .request_streaming(Request::Index {
+            mode: IndexMode::Update,
+            repo_dir: h.repo.path().join("missing-repository"),
+        })
+        .await
+        .unwrap();
+    futures::pin_mut!(stream);
+    let mut saw_error = false;
+    while let Some(frame) = stream.next().await {
+        if matches!(frame, Response::Error(_)) {
+            saw_error = true;
+        }
+    }
+    assert!(saw_error);
+
+    let mut search = DaemonClient::connect(&socket).await.unwrap();
+    let response = search
+        .request(Request::Search {
+            query: "alpha".into(),
+            top_k: 5,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(response, Response::Search(_)), "{response:?}");
 }
 
 #[tokio::test(flavor = "current_thread")]

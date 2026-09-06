@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crossbeam_channel::bounded;
-use inference::{Embedder, Role};
+use inference::{Embedder, Embedding, Role};
 use rayon::prelude::*;
 use retrieval::{LexicalDoc, LexicalIndex};
 use serde::{Deserialize, Serialize};
@@ -121,6 +121,7 @@ pub struct Indexer<'a> {
     interrupt_after_batches: Option<u64>,
     batches_committed: u64,
     publication: PublicationJournal,
+    embedding_cache: HashMap<ContentHash, Embedding>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,6 +278,7 @@ impl<'a> Indexer<'a> {
             interrupt_after_batches: None,
             batches_committed: 0,
             publication,
+            embedding_cache: HashMap::new(),
         })
     }
 
@@ -876,15 +878,21 @@ impl<'a> Indexer<'a> {
         if unique.is_empty() {
             return Ok(());
         }
-        let texts: Vec<&str> = unique.iter().map(|(_, b)| b.as_str()).collect();
-        let t_embed = Instant::now();
-        let embeddings = self.embedder.embed(&texts, Role::Document)?;
-        report.embed_millis += t_embed.elapsed().as_millis() as u64;
+        let missing: Vec<_> = unique
+            .iter()
+            .filter(|(record, _)| !self.embedding_cache.contains_key(&record.content_hash))
+            .collect();
+        let missing_count = missing.len() as u64;
+        if !missing.is_empty() {
+            let texts: Vec<&str> = missing.iter().map(|(_, body)| body.as_str()).collect();
+            let t_embed = Instant::now();
+            let embeddings = self.embedder.embed(&texts, Role::Document)?;
+            report.embed_millis += t_embed.elapsed().as_millis() as u64;
 
-        assert_eq!(embeddings.len(), unique.len());
-        let mut embedding_by_hash = HashMap::with_capacity(unique.len());
-        for (item, embedding) in unique.iter().zip(embeddings.iter()) {
-            embedding_by_hash.insert(item.0.content_hash, embedding.clone());
+            assert_eq!(embeddings.len(), missing.len());
+            for ((record, _), embedding) in missing.into_iter().zip(embeddings) {
+                self.embedding_cache.insert(record.content_hash, embedding);
+            }
         }
 
         let lexical_docs: Vec<_> = items
@@ -904,7 +912,8 @@ impl<'a> Indexer<'a> {
             .collect();
         let mut batch = Vec::with_capacity(items.len());
         for (rec, _) in &items {
-            let emb = embedding_by_hash
+            let emb = self
+                .embedding_cache
                 .get(&rec.content_hash)
                 .expect("embedding exists for every pending content hash");
             if emb.truncated {
@@ -952,7 +961,7 @@ impl<'a> Indexer<'a> {
 
         let novel = batch.len() as u64;
         report.chunks_added += novel;
-        report.embeddings_computed += unique.len() as u64;
+        report.embeddings_computed += missing_count;
         self.batches_committed += 1;
 
         if let Some(limit) = self.interrupt_after_batches

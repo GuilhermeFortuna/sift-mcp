@@ -37,6 +37,14 @@ coherent publication after interruption.
 
 - Normal searches use an immutable resident snapshot and do not hold the
   indexing owner lock during inference or retrieval.
+- The resident snapshot is logical rather than a full physical corpus copy: it
+  retains immutable dense state, a frozen Tantivy generation, snapshot-bound
+  SQLite readers, model identity, and lightweight counters only.
+- Metadata and bodies are loaded on demand from readers bound to the same
+  publication state; a search never mixes dense, SQLite, and Tantivy states
+  from different publications.
+- A failed replacement refresh leaves the previous valid snapshot serving and
+  reports the refresh failure separately.
 - Store mutations and lexical mutations are journaled in an ordered,
   crash-recoverable publication protocol, including insertion, removal, rename,
   and compaction row renumbering.
@@ -56,6 +64,8 @@ coherent publication after interruption.
   is inferred from CPU-only or compile-only validation.
 - The exhaustive dense search contract and model trait boundary remain intact;
   this task changes backend selection and publication/serving integration.
+- Indexing remains incremental and does not copy the full physical store for
+  every reindex.
 - No runtime Python is introduced.
 
 ## Acceptance criteria
