@@ -134,6 +134,23 @@ cd sift-mcp
 ./ci.sh
 ```
 
+For the local Console workflow, use the single launcher. It builds stale UI
+assets and release binaries on demand, starts only the Console, and leaves
+daemon lifecycle to Console/MCP repository registrations:
+
+```bash
+./scripts/sift run       # Console at http://127.0.0.1:7331
+./scripts/sift dev       # Console plus Vite hot reload
+./scripts/sift status
+./scripts/sift logs
+./scripts/sift stop
+```
+
+Use `./scripts/sift build` for all release binaries. The explicit
+`./scripts/sift daemon` command is reserved for manual CUDA diagnostics and
+requires `SIFT_REPO`, `SIFT_MODEL`, and `SIFT_STORE`; it does not make the
+launcher responsible for unrelated registered daemons.
+
 Index a repository with the deterministic CPU mock embedder:
 
 ```bash

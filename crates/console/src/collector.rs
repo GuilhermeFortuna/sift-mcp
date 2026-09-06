@@ -1,6 +1,63 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use daemon::{DaemonClient, DaemonError, DaemonStatus, EventCursor, Observation};
+
+struct ObserverSession {
+    socket: PathBuf,
+    client: DaemonClient,
+}
+
+#[derive(Default)]
+pub struct ObserverPool {
+    sessions: BTreeMap<String, ObserverSession>,
+}
+
+impl ObserverPool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn remove(&mut self, repository_id: &str) {
+        self.sessions.remove(repository_id);
+    }
+
+    pub async fn observe(
+        &mut self,
+        repository_id: &str,
+        socket: &Path,
+        after: Option<EventCursor>,
+    ) -> Result<Observation, DaemonError> {
+        let needs_connection = self
+            .sessions
+            .get(repository_id)
+            .is_none_or(|session| session.socket != socket);
+        if needs_connection {
+            let client = DaemonClient::connect_observer(socket).await?;
+            self.sessions.insert(
+                repository_id.into(),
+                ObserverSession {
+                    socket: socket.to_path_buf(),
+                    client,
+                },
+            );
+        }
+
+        let result = self
+            .sessions
+            .get_mut(repository_id)
+            .expect("observer session inserted above")
+            .client
+            .observe(after)
+            .await;
+        if result.is_err() {
+            self.remove(repository_id);
+        }
+        result
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CollectedStatus {

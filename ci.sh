@@ -20,6 +20,7 @@ export CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG
 export ORT_CUDA_VERSION=12
 
 cargo fmt --all -- --check
+bash -n scripts/sift
 cargo check -p daemon --features cuda --bin sift-daemon
 cargo check -p eval --features cuda --example evaluate
 cargo check -p eval --features cuda --example proxy_kpi

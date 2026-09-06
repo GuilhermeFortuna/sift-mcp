@@ -12,7 +12,7 @@ use retrieval::FusionConfig;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinSet;
-use tracing::{info, warn};
+use tracing::{Level, debug, error, info, warn};
 
 use crate::codec::encode;
 use crate::handshake::handle_hello;
@@ -142,12 +142,14 @@ impl Daemon {
         let embedder = Arc::clone(&self.embedder);
         let load_state = Arc::clone(&self.state);
         tokio::task::spawn_blocking(move || {
+            info!("loading resident model and index");
             if let Some(delay) = *load_state.load_delay.lock() {
                 std::thread::sleep(delay);
             }
             match Resident::load(&store_dir, &repo_dir, embedder) {
                 Ok(resident) => match resident.into_ready() {
                     Ok(ready) => {
+                        info!("resident model and index ready");
                         *load_state.serving.write().unwrap() = ServingState::Ready(Arc::new(ready));
                     }
                     Err(e) => {
@@ -1076,12 +1078,65 @@ fn request_type_name(req: &Request) -> &'static str {
     }
 }
 
+fn request_log_level(req_type: &str, outcome: &str) -> Level {
+    match outcome {
+        "ok" if matches!(req_type, "Hello" | "Observe" | "Status") => Level::DEBUG,
+        "ok" => Level::INFO,
+        "starting" | "forbidden" => Level::WARN,
+        _ => Level::ERROR,
+    }
+}
+
 fn log_request(request_id: u64, req_type: &str, outcome: &str, stage: Option<String>) {
-    info!(
-        request_id,
-        req_type,
-        outcome,
-        stage = stage.as_deref().unwrap_or(""),
-        "daemon request"
-    );
+    match request_log_level(req_type, outcome) {
+        Level::DEBUG => debug!(
+            request_id,
+            req_type,
+            outcome,
+            stage = stage.as_deref().unwrap_or(""),
+            "daemon request"
+        ),
+        Level::INFO => info!(
+            request_id,
+            req_type,
+            outcome,
+            stage = stage.as_deref().unwrap_or(""),
+            "daemon request"
+        ),
+        Level::WARN => warn!(
+            request_id,
+            req_type,
+            outcome,
+            stage = stage.as_deref().unwrap_or(""),
+            "daemon request"
+        ),
+        _ => error!(
+            request_id,
+            req_type,
+            outcome,
+            stage = stage.as_deref().unwrap_or(""),
+            "daemon request"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod request_logging_tests {
+    use super::*;
+
+    #[test]
+    fn routine_successes_are_debug_and_operations_are_info() {
+        assert_eq!(request_log_level("Hello", "ok"), Level::DEBUG);
+        assert_eq!(request_log_level("Observe", "ok"), Level::DEBUG);
+        assert_eq!(request_log_level("Status", "ok"), Level::DEBUG);
+        assert_eq!(request_log_level("Search", "ok"), Level::INFO);
+        assert_eq!(request_log_level("Index", "ok"), Level::INFO);
+    }
+
+    #[test]
+    fn recoverable_conditions_warn_and_failures_error() {
+        assert_eq!(request_log_level("Search", "starting"), Level::WARN);
+        assert_eq!(request_log_level("Search", "forbidden"), Level::WARN);
+        assert_eq!(request_log_level("Search", "error"), Level::ERROR);
+    }
 }

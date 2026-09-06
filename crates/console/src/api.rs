@@ -314,6 +314,7 @@ fn start_collector(state: std::sync::Weak<AppState>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(2));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut observers = crate::collector::ObserverPool::new();
         loop {
             interval.tick().await;
             let Some(state) = state.upgrade() else { break };
@@ -328,14 +329,12 @@ fn start_collector(state: std::sync::Weak<AppState>) {
                     continue;
                 };
                 if !socket.exists() {
+                    observers.remove(&r.id);
                     continue;
                 }
                 let mut cursor = db.cursor(&r.id).await.ok().flatten();
                 for _ in 0..4 {
-                    let observed = async {
-                        let mut c = daemon::DaemonClient::connect_observer(&socket).await?;
-                        c.observe(cursor.clone()).await
-                    };
+                    let observed = observers.observe(&r.id, &socket, cursor.clone());
                     match tokio::time::timeout(Duration::from_secs(2), observed).await {
                         Ok(Ok(o)) => {
                             let more = o.more;

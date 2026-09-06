@@ -4,7 +4,7 @@
   "type": "module",
   "version": "0.1.0",
   "packageManager": "pnpm@10.11.0",
-  "scripts": { "build": "vite build", "typecheck": "tsc --noEmit", "test": "vitest run" },
+  "scripts": { "build": "vite build", "dev": "vite", "typecheck": "tsc --noEmit", "test": "vitest run" },
   "dependencies": { "@vitejs/plugin-react": "latest", "vite": "latest", "typescript": "latest", "react": "latest", "react-dom": "latest" },
   "devDependencies": { "vitest": "latest", "@types/react": "latest", "@types/react-dom": "latest" }
 }

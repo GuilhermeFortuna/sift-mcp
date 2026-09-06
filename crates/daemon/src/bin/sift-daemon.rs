@@ -3,15 +3,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use daemon::{Daemon, DaemonConfig};
-use inference::OnnxEmbedder;
+use inference::{Embedder, OnnxEmbedder};
 use retrieval::FusionConfig;
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::from_default_env().add_directive("daemon=info".parse().unwrap()),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("daemon=info")),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -59,9 +60,23 @@ async fn main() {
         Some(p) => p,
         None => daemon::paths::socket_path_for_store(&store_dir).expect("socket path"),
     };
+    let socket_display = socket_path.display().to_string();
 
+    info!(
+        store = %store_dir.display(),
+        repo = %repo_dir.display(),
+        model = %model_dir.display(),
+        "starting CUDA daemon"
+    );
     let embedder = match OnnxEmbedder::load(&model_dir, 32) {
-        Ok(embedder) => Arc::new(embedder) as Arc<dyn inference::Embedder>,
+        Ok(embedder) => {
+            info!(
+                model_id = embedder.model_id(),
+                dims = embedder.dims(),
+                "CUDA provider ready"
+            );
+            Arc::new(embedder) as Arc<dyn inference::Embedder>
+        }
         Err(error) => {
             eprintln!("load CUDA embedder failed: {error}");
             std::process::exit(1);
@@ -88,6 +103,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    info!(socket = %socket_display, "daemon listening");
     if let Err(e) = daemon.serve().await {
         eprintln!("serve failed: {e:?}");
         std::process::exit(1);
