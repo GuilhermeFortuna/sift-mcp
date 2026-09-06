@@ -1,7 +1,12 @@
 pub mod api;
+pub mod assets;
 pub mod collector;
+pub mod db;
+pub mod freshness;
 pub mod history;
+pub mod jobs;
 pub mod registry;
+pub mod security;
 
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -27,7 +32,16 @@ pub async fn serve(config: ConsoleConfig) -> Result<(), Box<dyn std::error::Erro
     if !config.listen.ip().is_loopback() {
         return Err("console listen address must be loopback".into());
     }
-    let listener = tokio::net::TcpListener::bind(config.listen).await?;
-    axum::serve(listener, api::router()).await?;
+    let listen = config.listen;
+    let app = api::application(config).await?;
+    let listener = tokio::net::TcpListener::bind(listen).await?;
+    axum::serve(listener, app).await?;
     Ok(())
+}
+
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }

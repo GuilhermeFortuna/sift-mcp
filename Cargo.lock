@@ -346,6 +346,7 @@ name = "console"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bincode",
  "daemon",
  "fs4 0.13.1",
  "futures",
