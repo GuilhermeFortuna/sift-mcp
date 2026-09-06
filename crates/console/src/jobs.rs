@@ -75,7 +75,14 @@ impl Jobs {
         registration: Registration,
         mode: daemon::IndexMode,
     ) -> Result<IndexJob, ApiError> {
-        if self.running(&registration.id).await {
+        // Keep the check and reservation together. Persisting while this write
+        // guard is held prevents another launch from passing the check before
+        // this job becomes visible to readers.
+        let mut items = self.items.write().await;
+        if items
+            .values()
+            .any(|j| j.repository_id == registration.id && j.state == JobState::Running)
+        {
             return Err(daemon::DaemonError::IndexInProgress.into());
         }
         let job = IndexJob {
@@ -89,7 +96,8 @@ impl Jobs {
             error_code: None,
         };
         self.persist(&job).await?;
-        self.items.write().await.insert(job.id.clone(), job.clone());
+        items.insert(job.id.clone(), job.clone());
+        drop(items);
         let this = self.clone();
         let id = job.id.clone();
         let (accepted, rx) = tokio::sync::oneshot::channel();

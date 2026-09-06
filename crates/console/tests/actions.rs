@@ -123,6 +123,50 @@ async fn indexing_survives_http_disconnect_and_refuses_duplicate_and_edits() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn concurrent_index_requests_create_only_one_running_job() {
+    let (_t, app, token, r) = setup().await;
+    let id = r["id"].as_str().unwrap().to_owned();
+    let socket = daemon::paths::socket_path_for_store(std::path::Path::new(
+        r["config"]["store_path"].as_str().unwrap(),
+    ))
+    .unwrap();
+    let mock = support::MockDaemon::bind(socket, Response::IndexDone(report())).await;
+    let path = format!("/api/v1/repositories/{id}/index");
+
+    let (first, second) = tokio::join!(
+        request(&app, "POST", &path, &token, json!({"mode":"update"})),
+        request(&app, "POST", &path, &token, json!({"mode":"update"})),
+    );
+
+    let statuses = [first.0, second.0];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|s| **s == StatusCode::ACCEPTED)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|s| **s == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    assert_eq!(
+        mock.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| matches!(r, daemon::Request::Index { .. }))
+            .count(),
+        1
+    );
+    mock.finish_index.notify_one();
+}
+
 #[tokio::test]
 async fn search_and_similar_preserve_daemon_records_and_reject_operation_paths() {
     let (_t, app, token, r) = setup().await;
