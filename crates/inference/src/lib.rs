@@ -6,6 +6,8 @@ pub mod embedder;
 pub mod metadata;
 pub mod mock;
 #[cfg(feature = "cuda")]
+pub mod nvml;
+#[cfg(feature = "cuda")]
 pub mod onnx;
 pub mod pooling;
 pub mod tokenize;
@@ -14,7 +16,7 @@ pub use artifacts::verify_model_dir;
 #[cfg(feature = "cuda")]
 pub use dense::CudaDenseScorer;
 pub use dense::DenseScorer;
-pub use embedder::{Embedder, Embedding, InferError, Role};
+pub use embedder::{Embedder, Embedding, InferError, ResourceUsage, Role};
 pub use metadata::{MetadataError, ModelMetadata, Normalize, Pooling};
 pub use mock::MockEmbedder;
 #[cfg(feature = "cuda")]

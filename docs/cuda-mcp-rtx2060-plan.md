@@ -13,6 +13,23 @@ Cloud:     reason, plan, edit, review, decide
 
 ## Hard constraints
 
+### Independent UI series
+
+The local console is a separately authorized **UI series, Batch 01**, using
+task IDs UI-001 through UI-005. It covers passive observability, a local
+multiple-repository console, repository operations, and search inspection.
+See [the authoritative task ledger](development/STATUS.md#ui-series--batch-01-local-console)
+for its spec/plan pairs and cross-series dependencies, and
+[the governing stack decision](tech-stack.md#local-console--ui-series-batch-01)
+for its Rust service and browser frontend.
+
+This work is not SIFT Batch 02. It neither advances the Phase 2 retrieval gate
+nor replaces the pinned-corpus or human/hardware acceptance evidence. Planning
+and implementing a UI task never implies authorization to execute another SIFT
+task or to mark its acceptance complete.
+
+### Runtime limits
+
 | Constraint | Value |
 |---|---|
 | VRAM budget | ~5.0 GB usable (desktop attached to GPU) |
@@ -211,8 +228,8 @@ git diff --name-status
    v
 re-parse touched files only
    |
-   +-- unchanged hash  -> reuse embedding row
-   +-- new hash        -> embed, append row
+   +-- unchanged hash  -> reuse embedding computation, retain occurrence row
+   +-- new hash        -> embed, append occurrence row
    +-- vanished hash   -> tombstone row
 ```
 

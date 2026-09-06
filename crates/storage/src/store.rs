@@ -3,7 +3,9 @@ use crate::matrix::EmbeddingMatrix;
 use crate::record::{ChunkRecord, ContentHash, RowId};
 use half::f16;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// Metadata schema version. Independent of the matrix format version.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -51,6 +53,65 @@ pub struct ChunkStore {
     statements_prepared: std::cell::Cell<u64>,
     /// Test hook: fail before committing insert_batch when set.
     fail_before_commit: bool,
+}
+
+/// A read-only SQLite view pinned to the active database file and a single
+/// read transaction. It remains tied to that publication even if a later
+/// store publication changes the directory manifest.
+pub struct SnapshotReader {
+    conn: Mutex<Connection>,
+}
+
+impl SnapshotReader {
+    pub fn open(dir: &Path) -> Result<Self, StoreError> {
+        let (db_path, _) = active_paths(dir)?;
+        let conn =
+            Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.execute_batch(
+            "PRAGMA query_only=ON;
+             PRAGMA busy_timeout=5000;
+             BEGIN;",
+        )?;
+        let _: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    pub fn get_many(&self, rows: &[RowId]) -> Result<Vec<Option<ChunkRecord>>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Io(std::io::Error::other("snapshot reader lock poisoned")))?;
+        let mut stmt = conn.prepare(
+            "SELECT repository, file, language, symbol, symbol_type, signature,
+                    doc_first_line, line_start, line_end, content_hash
+             FROM chunks WHERE rowid = ?1 AND live = 1",
+        )?;
+        rows.iter()
+            .map(|row| {
+                stmt.query_row(params![row.get() as i64], row_to_record)
+                    .optional()
+                    .map_err(StoreError::from)
+            })
+            .collect()
+    }
+
+    pub fn rows_for_file(&self, file: &str) -> Result<Vec<RowId>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Io(std::io::Error::other("snapshot reader lock poisoned")))?;
+        let mut stmt =
+            conn.prepare("SELECT rowid FROM chunks WHERE file = ?1 AND live = 1 ORDER BY rowid")?;
+        let rows = stmt
+            .query_map(params![file], |r| {
+                let id: i64 = r.get(0)?;
+                Ok(RowId::new(id as u64))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
 }
 
 impl std::fmt::Debug for ChunkStore {
@@ -145,6 +206,10 @@ impl ChunkStore {
         let (db_path, matrix_path) = active_paths(dir)?;
         let conn = Connection::open(&db_path)?;
         configure_connection(&conn)?;
+        // Schema v1 originally enforced one live row per content hash. Keep
+        // opening those stores compatible while allowing one row per file
+        // occurrence going forward.
+        conn.execute_batch("DROP INDEX IF EXISTS chunks_live_hash;")?;
         let version: u32 = meta_u32(&conn, "schema_version")?;
         if version != SCHEMA_VERSION {
             return Err(StoreError::SchemaVersion {
@@ -169,8 +234,7 @@ impl ChunkStore {
         }
     }
 
-    /// Atomic batch. Returns one RowId per input, reusing the row of any
-    /// content hash already live.
+    /// Atomic batch. Returns one distinct RowId per input occurrence.
     pub fn insert_batch(
         &mut self,
         chunks: &[(ChunkRecord, Vec<f16>)],
@@ -194,24 +258,8 @@ impl ChunkStore {
         let mut result = Vec::with_capacity(chunks.len());
         let mut new_rows: Vec<(RowId, &ChunkRecord)> = Vec::new();
 
-        // Resolve hashes that already exist; only append for novel hashes.
-        // Within-batch duplicates reuse the first new/existing row.
-        let mut batch_hash_to_row: std::collections::HashMap<[u8; 32], RowId> =
-            std::collections::HashMap::new();
-
         for (rec, vec) in chunks {
-            let hash = *rec.content_hash.as_bytes();
-            if let Some(row) = batch_hash_to_row.get(&hash) {
-                result.push(*row);
-                continue;
-            }
-            if let Some((row, _)) = self.get_by_hash(&rec.content_hash)? {
-                batch_hash_to_row.insert(hash, row);
-                result.push(row);
-                continue;
-            }
             let row = self.matrix_mut().append(vec)?;
-            batch_hash_to_row.insert(hash, row);
             new_rows.push((row, rec));
             result.push(row);
         }
@@ -359,6 +407,19 @@ impl ChunkStore {
         Ok(rows)
     }
 
+    /// All repository-relative paths with at least one live occurrence.
+    pub fn live_files(&self) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT file FROM chunks WHERE live = 1 ORDER BY file")?;
+        let files = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<BTreeSet<_>, _>>()?
+            .into_iter()
+            .collect();
+        Ok(files)
+    }
+
     /// All live matrix positions in ascending row order.
     pub fn live_rows(&self) -> Result<Vec<RowId>, StoreError> {
         let mut stmt = self
@@ -380,6 +441,37 @@ impl ChunkStore {
                 tx.prepare("UPDATE chunks SET live = 0 WHERE rowid = ?1 AND live = 1")?;
             for row in rows {
                 stmt.execute(params![row.get() as i64])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Refresh metadata for existing live rows without changing their matrix positions.
+    pub fn update_records(&mut self, records: &[(RowId, ChunkRecord)]) -> Result<(), StoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE chunks
+                 SET repository = ?1, file = ?2, language = ?3, symbol = ?4,
+                     symbol_type = ?5, signature = ?6, doc_first_line = ?7,
+                     line_start = ?8, line_end = ?9, content_hash = ?10
+                 WHERE rowid = ?11 AND live = 1",
+            )?;
+            for (row, record) in records {
+                stmt.execute(params![
+                    record.repository,
+                    record.file,
+                    record.language,
+                    record.symbol,
+                    record.symbol_type,
+                    record.signature,
+                    record.doc_first_line,
+                    record.line_start as i64,
+                    record.line_end as i64,
+                    record.content_hash.as_bytes().as_slice(),
+                    row.get() as i64,
+                ])?;
             }
         }
         tx.commit()?;
@@ -448,23 +540,6 @@ impl ChunkStore {
                 let id = id? as u64;
                 if id >= matrix_rows {
                     missing_rows.push(RowId::new(id));
-                }
-            }
-        }
-
-        // Duplicate live content hashes.
-        {
-            let mut stmt = self.conn.prepare(
-                "SELECT rowid FROM chunks WHERE live = 1 AND content_hash IN (
-                    SELECT content_hash FROM chunks WHERE live = 1
-                    GROUP BY content_hash HAVING COUNT(*) > 1
-                 )",
-            )?;
-            let ids = stmt.query_map([], |r| r.get::<_, i64>(0))?;
-            for id in ids {
-                let row = RowId::new(id? as u64);
-                if !duplicate_rows.contains(&row) {
-                    duplicate_rows.push(row);
                 }
             }
         }
@@ -761,7 +836,6 @@ fn init_schema(conn: &Connection) -> Result<(), StoreError> {
             content_hash BLOB NOT NULL,
             live INTEGER NOT NULL DEFAULT 1 CHECK (live IN (0, 1))
          );
-         CREATE UNIQUE INDEX chunks_live_hash ON chunks(content_hash) WHERE live = 1;
          CREATE INDEX chunks_file_live ON chunks(file) WHERE live = 1;",
     )?;
     Ok(())

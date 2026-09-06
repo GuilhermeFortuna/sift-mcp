@@ -1,7 +1,7 @@
 use half::f16;
 use tempfile::tempdir;
 
-use storage::{ChunkRecord, ChunkStore, ContentHash};
+use storage::{ChunkRecord, ChunkStore, ContentHash, SnapshotReader};
 
 fn sample_record(hash_seed: u8) -> ChunkRecord {
     let mut bytes = [0u8; 32];
@@ -46,4 +46,31 @@ fn single_chunk_round_trip_by_row_hash_and_file() {
 
     let file_rows = store.rows_for_file("src/lib.rs").unwrap();
     assert_eq!(file_rows, vec![row]);
+}
+
+#[test]
+fn snapshot_reader_stays_on_its_publication_state() {
+    let dir = tempdir().unwrap();
+    let mut store = ChunkStore::create(dir.path(), 4, "model-a").unwrap();
+    let old = sample_record(1);
+    let new = ChunkRecord {
+        file: "src/new.rs".into(),
+        symbol: "new".into(),
+        ..sample_record(2)
+    };
+    let old_row = store
+        .insert_batch(&[(old.clone(), sample_vec(4, 0.5))])
+        .unwrap()[0];
+    let snapshot = SnapshotReader::open(dir.path()).unwrap();
+
+    store.insert_batch(&[(new, sample_vec(4, 0.75))]).unwrap();
+
+    let records = snapshot
+        .get_many(&[old_row, storage::RowId::from_u64(1)])
+        .unwrap();
+    assert_eq!(records[0].as_ref(), Some(&old));
+    assert!(
+        records[1].is_none(),
+        "reader must not see later publication"
+    );
 }

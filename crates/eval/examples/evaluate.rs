@@ -1,12 +1,12 @@
 //! Evaluate retrieval over a store.
 //!
 //! ```text
-//! cargo run --release -p eval --example evaluate -- <store-path> [--ablations] [--set mined|docstring|handwritten] [--repo <path>]
+//! cargo run --release -p eval --features cuda --example evaluate -- <store-path> --model <model-dir> [--ablations] [--set mined|docstring|handwritten] [--repo <path>]
 //! ```
 
 use std::env;
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use eval::{
@@ -14,7 +14,7 @@ use eval::{
     load_handwritten, mine_commits, mine_docstrings,
 };
 use indexing::RepoGit;
-use inference::{Embedder, MockEmbedder};
+use inference::{Embedder, OnnxEmbedder};
 use retrieval::dense::{DenseBackend, DenseIndex};
 use retrieval::{FusionConfig, LexicalIndex, Searcher};
 use storage::ChunkStore;
@@ -32,6 +32,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut set_name = "mined".to_string();
     let mut repo: Option<PathBuf> = None;
     let mut store_path: Option<PathBuf> = None;
+    let mut model_dir: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -47,6 +48,12 @@ fn run() -> Result<(), Box<dyn Error>> {
                     args.get(i).ok_or("missing value for --repo")?,
                 ));
             }
+            "--model" => {
+                i += 1;
+                model_dir = Some(PathBuf::from(
+                    args.get(i).ok_or("missing value for --model")?,
+                ));
+            }
             flag if flag.starts_with('-') => {
                 return Err(format!("unknown flag {flag}").into());
             }
@@ -59,14 +66,20 @@ fn run() -> Result<(), Box<dyn Error>> {
         i += 1;
     }
 
-    let store_path = store_path.ok_or("usage: evaluate <store-path> [--ablations] [--set …]")?;
+    let store_path = store_path
+        .ok_or("usage: evaluate <store-path> --model <model-dir> [--ablations] [--set …]")?;
+    let model_dir = model_dir.ok_or("evaluate requires --model <model-dir>")?;
     let store = ChunkStore::open(&store_path)?;
-    let embedder =
-        MockEmbedder::new(store.matrix().dims()).with_model_id(store.matrix().model_id());
+    let embedder = OnnxEmbedder::load(&model_dir, 32)?;
+    store.require_model(embedder.model_id())?;
     let lexical = LexicalIndex::open(store.dir())?;
-    let dense = DenseIndex::from_store(&store, DenseBackend::Cpu)?;
+    let dense = DenseIndex::from_store(&store, DenseBackend::Cuda)?;
     let searcher = Searcher::new(&lexical, &dense, &store, &embedder);
 
+    let mined_repo = (set_name == "mined").then(|| {
+        repo.clone()
+            .unwrap_or_else(|| eval::expand_home(eval::MINED_CORPUS_DEFAULT_PATH))
+    });
     let labels = match set_name.as_str() {
         "handwritten" => load_handwritten(&default_handwritten_path())?,
         "docstring" => {
@@ -74,11 +87,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             mine_docstrings(repo_path, &store)?.0
         }
         "mined" => {
-            let repo_path = repo
-                .clone()
-                .unwrap_or_else(|| eval::expand_home(eval::MINED_CORPUS_DEFAULT_PATH));
+            let repo_path = mined_repo.as_ref().expect("mined repo path is resolved");
             mine_commits(
-                &repo_path,
+                repo_path,
                 &store,
                 &MiningConfig {
                     enforce_pinned_revision: true,
@@ -96,7 +107,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         vec![Ablation::Fused]
     };
 
-    let repo_commit = repo
+    let repo_commit = manifest_repo(&set_name, repo.as_deref())
         .as_ref()
         .and_then(|r| RepoGit::open(r).ok()?.head_commit().ok())
         .unwrap_or_default();
@@ -144,4 +155,27 @@ fn chrono_like_now() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{secs}")
+}
+
+fn manifest_repo(set_name: &str, repo: Option<&Path>) -> Option<PathBuf> {
+    match set_name {
+        "mined" => Some(
+            repo.map(Path::to_path_buf)
+                .unwrap_or_else(|| eval::expand_home(eval::MINED_CORPUS_DEFAULT_PATH)),
+        ),
+        _ => repo.map(Path::to_path_buf),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::manifest_repo;
+
+    #[test]
+    fn default_mined_manifest_uses_the_default_corpus_path() {
+        assert_eq!(
+            manifest_repo("mined", None),
+            Some(eval::expand_home(eval::MINED_CORPUS_DEFAULT_PATH))
+        );
+    }
 }

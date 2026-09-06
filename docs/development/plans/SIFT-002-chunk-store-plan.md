@@ -91,8 +91,7 @@ impl ChunkStore {
     pub fn create(dir: &Path, dims: u32, model_id: &str) -> Result<Self, StoreError>;
     pub fn open(dir: &Path) -> Result<Self, StoreError>;
 
-    /// Atomic batch. Returns one RowId per input, reusing the row of any
-    /// content hash already live.
+    /// Atomic batch. Returns one distinct RowId per input occurrence.
     pub fn insert_batch(&mut self, chunks: &[(ChunkRecord, Vec<f16>)]) -> Result<Vec<RowId>, StoreError>;
 
     pub fn get(&self, row: RowId) -> Result<Option<ChunkRecord>, StoreError>;
@@ -155,15 +154,15 @@ pub enum StoreError {
   materializing a compacted copy per query, defeating the memory-map. The mask
   is a bitmap the store maintains, cheap to consult per row and cheap to build.
 
-- **The content hash is unique among live records, enforced by a partial unique
-  index in SQLite rather than by a check in Rust.** A Rust-side check races with
-  itself under a batch containing two identical bodies; the database constraint
-  cannot.
+- **The content hash is not unique among live records.** File and source
+  metadata are occurrence-specific, so identical normalized content in two
+  files must retain two row positions. The indexing pipeline deduplicates
+  embedding computation without collapsing those metadata occurrences.
 
-- **`insert_batch` returns one `RowId` per input in input order, including for
-  inputs that resolved to an existing row.** Returning only the newly created
-  rows would force the caller to correlate by hash, and that correlation is
-  exactly the error this crate exists to prevent.
+- **`insert_batch` returns one distinct `RowId` per input in input order.**
+  Returning only newly created rows would force the caller to correlate
+  occurrence metadata by hash, and that correlation is exactly the error this
+  crate exists to prevent.
 
 - **`get_many` binds the row set into a single query using a temporary table or
   a carray-style binding rather than issuing one statement per row.** Fusion in
@@ -214,11 +213,10 @@ pub enum StoreError {
    distinct hashes, every record read back by row equals the record written, and
    the row ids returned are distinct and dense from zero. Run and confirm it
    fails. Implement `insert_batch` in a transaction. Confirm it passes. Commit.
-7. Write failing tests for hash deduplication: inserting a batch containing two
-   records with the same content hash returns the same row id twice and grows
-   the matrix by one row; inserting a record whose hash is already live returns
-   the existing row id and does not grow the matrix. Run and confirm they fail.
-   Add the partial unique index and the reuse path. Confirm they pass. Commit.
+7. Write failing tests for identical occurrences: inserting a batch containing
+   two records with the same content hash returns two distinct row ids and
+   grows the matrix by two rows. Run and confirm they fail. Implement the
+   occurrence-preserving insert path. Confirm they pass. Commit.
 8. Write failing tests for `get_many`: requesting five rows returns five results
    in the order requested, with `None` for a tombstoned row; a counting hook
    asserts the number of prepared statements executed is independent of the
@@ -268,9 +266,9 @@ pub enum StoreError {
   rejection; record round trip by row, hash, and path; tombstone accounting;
   `verify` on healthy and on three distinct corruptions; compaction preserving
   fields and vectors.
-- **Integration:** batch insert with deduplication across a generated corpus,
-  followed by `verify`; batch insert interrupted by a forced failure, followed
-  by reopen and `verify`.
+- **Integration:** batch insert with repeated content across a generated
+  corpus, followed by `verify`; batch insert interrupted by a forced failure,
+  followed by reopen and `verify`.
 - **Regression:** none — this task establishes the on-disk format. The format
   version constant is introduced here at 1 and becomes the reference later tasks
   must not silently change.

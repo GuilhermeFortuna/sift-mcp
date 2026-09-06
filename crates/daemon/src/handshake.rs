@@ -1,11 +1,14 @@
 //! Per-connection handshake and request dispatch helpers.
 
-use crate::protocol::{DaemonError, DaemonStatus, Envelope, PROTOCOL_VERSION, Request, Response};
+use crate::protocol::{
+    ClientRole, DaemonError, DaemonStatus, Envelope, PROTOCOL_VERSION, Request, Response,
+};
 
 /// Result of attempting to accept a Hello from a client.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HelloOk {
     pub client: String,
+    pub role: ClientRole,
 }
 
 /// Validate and answer a Hello. Any other first request is refused.
@@ -25,9 +28,11 @@ pub fn handle_hello(
                     client: *protocol_version,
                 })));
             }
+            let role = ClientRole::from_hello_client(client);
             Ok((
                 HelloOk {
                     client: client.clone(),
+                    role,
                 },
                 Box::new(Response::Hello {
                     protocol_version: PROTOCOL_VERSION,
@@ -50,6 +55,7 @@ pub fn status_response(status: DaemonStatus) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{OBSERVER_CLIENT, PROTOCOL_VERSION_V1};
 
     fn hello_env(version: u32) -> Envelope<Request> {
         Envelope {
@@ -61,10 +67,21 @@ mod tests {
         }
     }
 
+    fn observer_hello_env(version: u32) -> Envelope<Request> {
+        Envelope {
+            request_id: 1,
+            payload: Request::Hello {
+                protocol_version: version,
+                client: OBSERVER_CLIENT.into(),
+            },
+        }
+    }
+
     #[test]
     fn matching_protocol_version_succeeds() {
         let (ok, resp) = handle_hello(&hello_env(PROTOCOL_VERSION), "mock", 42).unwrap();
         assert_eq!(ok.client, "test-client");
+        assert_eq!(ok.role, ClientRole::Worker);
         match *resp {
             Response::Hello {
                 protocol_version,
@@ -80,6 +97,20 @@ mod tests {
     }
 
     #[test]
+    fn version_one_negotiation_yields_named_mismatch() {
+        let err = *handle_hello(&hello_env(PROTOCOL_VERSION_V1), "mock", 0).unwrap_err();
+        match err {
+            Response::Error(DaemonError::ProtocolVersion { daemon, client }) => {
+                assert_eq!(daemon, PROTOCOL_VERSION);
+                assert_eq!(client, PROTOCOL_VERSION_V1);
+                assert_eq!(daemon, 2);
+                assert_eq!(client, 1);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
     fn mismatched_protocol_version_names_both() {
         let err = *handle_hello(&hello_env(PROTOCOL_VERSION + 1), "mock", 0).unwrap_err();
         match err {
@@ -89,6 +120,14 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn observer_hello_negotiates_observer_role() {
+        let (ok, resp) = handle_hello(&observer_hello_env(PROTOCOL_VERSION), "mock", 0).unwrap();
+        assert_eq!(ok.role, ClientRole::Observer);
+        assert_eq!(ok.client, OBSERVER_CLIENT);
+        assert!(matches!(*resp, Response::Hello { .. }));
     }
 
     #[test]

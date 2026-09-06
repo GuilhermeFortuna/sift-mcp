@@ -1,0 +1,19 @@
+# Validate the workspace
+./ci.sh
+
+# Run CI with multiple workers
+CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 ./ci.sh
+
+# Start the local Console (builds stale UI assets and Console binary)
+./scripts/sift run
+
+# Start Console plus Vite hot reload
+./scripts/sift dev
+
+# Inspect or stop only launcher-owned services
+./scripts/sift status
+./scripts/sift logs
+./scripts/sift stop
+
+# Build all release binaries, including the CUDA daemon
+./scripts/sift build

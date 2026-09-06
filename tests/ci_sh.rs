@@ -59,3 +59,21 @@ fn validation_stages_remain_complete_and_ordered() {
 
     assert!(format < clippy && clippy < test && test < release);
 }
+
+#[test]
+fn cuda_feature_targets_are_compile_checked() {
+    let text = ci_sh();
+
+    assert!(
+        text.contains("cargo check -p daemon --features cuda --bin sift-daemon"),
+        "CI must compile the daemon CUDA feature path"
+    );
+    assert!(
+        text.contains("cargo check -p eval --features cuda --example evaluate"),
+        "CI must compile the CUDA evaluator"
+    );
+    assert!(
+        text.contains("cargo check -p eval --features cuda --example proxy_kpi"),
+        "CI must compile the CUDA proxy evaluator"
+    );
+}

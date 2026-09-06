@@ -8,6 +8,17 @@ the tree.
 The single validation command is [`./ci.sh`](ci.sh). Run it before you push.
 Continuous integration runs that same script and nothing else.
 
+Install the repository hooks once after cloning:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The pre-commit hook checks whitespace, applies rustfmt, automatically applies
+machine-fixable Clippy suggestions, and then fails on remaining warnings. The
+pre-push hook runs ./ci.sh, which is the complete local and CI validation
+suite.
+
 Workflow rules, branch naming (`SIFT-NNN-slug`), design authority
 (`docs/tech-stack.md` over `docs/cuda-mcp-rtx2060-plan.md`), and the constraint
 that GPU code stays behind the `inference` trait live in [`AGENTS.md`](AGENTS.md).

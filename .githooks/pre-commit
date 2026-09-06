@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+cargo fmt --all
+cargo clippy --fix --workspace --all-targets --allow-dirty --allow-staged -- -D warnings
+cargo fmt --all
+git diff --check
+cargo clippy --workspace --all-targets -- -D warnings

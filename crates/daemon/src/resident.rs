@@ -1,22 +1,24 @@
 //! Resident model/index state and prepare-then-swap indexing.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use indexing::{IndexConfig, IndexReport, Indexer, Phase, Progress};
-use inference::{Embedder, InferError, Role};
+use inference::{Embedder, InferError};
 use parking_lot::Mutex as ParkingMutex;
 use retrieval::dense::{DenseBackend, DenseIndex, LiveMask};
-use retrieval::fusion::{FusionConfig, fuse};
+use retrieval::fusion::FusionConfig;
 use retrieval::lexical::{LexicalIndex, LexicalSearchHandle};
-use retrieval::result::preview_from_body;
-use retrieval::{SearchDiagnostics, SearchResponse, SearchResult, Searcher, StageTimings};
-use storage::{ChunkRecord, ChunkStore, Integrity, RowId, SCHEMA_VERSION};
+use retrieval::{ScoredRow, SearchBackend, SearchResponse, Searcher};
+use storage::{ChunkRecord, ChunkStore, Integrity, RowId, SCHEMA_VERSION, SnapshotReader};
 
-use crate::protocol::{DaemonError, DaemonStatus, IndexReportWire, Response};
+use crate::observe::EventRing;
+use crate::protocol::{
+    DaemonError, DaemonStatus, IndexReportWire, LastIndexCompletion, Lifecycle, ResourceSnapshot,
+    Response,
+};
 
 /// Identity used to detect store delete/replace under a running daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,12 +74,22 @@ pub struct Resident {
     pub repo_dir: PathBuf,
 }
 
+fn dense_backend() -> DenseBackend {
+    #[cfg(feature = "cuda")]
+    {
+        DenseBackend::Cuda
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        DenseBackend::Cpu
+    }
+}
+
 /// Immutable search view used while an index runs against owned store parts.
 pub struct FrozenSearch {
     dense: DenseIndex,
     lexical: LexicalSearchHandle,
-    records: HashMap<u64, ChunkRecord>,
-    bodies: HashMap<u64, String>,
+    metadata: SnapshotReader,
     embedder: Arc<dyn Embedder>,
     identity: StoreIdentity,
     pub model_id: String,
@@ -86,10 +98,62 @@ pub struct FrozenSearch {
     pub indexed_commit: Option<String>,
 }
 
+impl SearchBackend for FrozenSearch {
+    fn lexical_search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ScoredRow>, retrieval::RetrievalError> {
+        self.lexical.search(query, limit)
+    }
+
+    fn dense_search(
+        &self,
+        query: &[retrieval::f16],
+        model_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ScoredRow>, retrieval::RetrievalError> {
+        self.dense.search(query, model_id, limit)
+    }
+
+    fn records(
+        &self,
+        rows: &[RowId],
+    ) -> Result<Vec<Option<ChunkRecord>>, retrieval::RetrievalError> {
+        Ok(self.metadata.get_many(rows)?)
+    }
+
+    fn bodies(&self, rows: &[RowId]) -> Result<Vec<Option<String>>, retrieval::RetrievalError> {
+        self.lexical.bodies(rows)
+    }
+}
+
+/// Ready-state ownership split between immutable search data and the single
+/// mutable indexing owner. Searches clone only `search`, so they never hold
+/// the indexing mutex while doing inference or retrieval.
+pub struct ReadyResident {
+    pub search: Arc<FrozenSearch>,
+    pub parts: Mutex<ResidentParts>,
+}
+
+pub struct ResidentParts {
+    pub store: ChunkStore,
+    pub lexical: LexicalIndex,
+    pub embedder: Arc<dyn Embedder>,
+    pub repo_dir: PathBuf,
+}
+
+pub type IndexParts = (
+    Arc<FrozenSearch>,
+    ChunkStore,
+    LexicalIndex,
+    PathBuf,
+    Arc<dyn Embedder>,
+);
+
 pub enum ServingState {
     Starting,
-    /// Mutex because [`ChunkStore`] is `Send` but not `Sync`.
-    Ready(Arc<Mutex<Resident>>),
+    Ready(Arc<ReadyResident>),
     Indexing(Arc<FrozenSearch>),
     Stale(String),
 }
@@ -108,7 +172,15 @@ pub struct SharedState {
     pub search_delay: ParkingMutex<Option<Duration>>,
     pub index_phase_delay: ParkingMutex<Option<Duration>>,
     pub shutdown: tokio::sync::Notify,
+    pub connection_shutdown: tokio::sync::Notify,
     pub shutting_down: ParkingMutex<bool>,
+    pub instance_id: String,
+    pub current_progress: ParkingMutex<Option<crate::protocol::IndexProgressSnapshot>>,
+    pub last_index: ParkingMutex<Option<LastIndexCompletion>>,
+    pub event_ring: ParkingMutex<EventRing>,
+    pub next_connection_id: AtomicU64,
+    pub record_events: AtomicBool,
+    pub cached_resources: ParkingMutex<(Instant, ResourceSnapshot)>,
 }
 
 impl SharedState {
@@ -131,69 +203,186 @@ impl SharedState {
             search_delay: ParkingMutex::new(None),
             index_phase_delay: ParkingMutex::new(None),
             shutdown: tokio::sync::Notify::new(),
+            connection_shutdown: tokio::sync::Notify::new(),
             shutting_down: ParkingMutex::new(false),
+            instance_id: new_instance_id(),
+            current_progress: ParkingMutex::new(None),
+            last_index: ParkingMutex::new(None),
+            event_ring: ParkingMutex::new(EventRing::default()),
+            next_connection_id: AtomicU64::new(1),
+            record_events: AtomicBool::new(true),
+            cached_resources: ParkingMutex::new((
+                Instant::now() - Duration::from_secs(10),
+                ResourceSnapshot::unavailable(0),
+            )),
         })
+    }
+
+    pub fn alloc_connection_id(&self) -> u64 {
+        self.next_connection_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub fn record_terminal(&self, draft: crate::observe::TerminalEventDraft, elapsed: Duration) {
+        if !self.record_events.load(Ordering::Relaxed) {
+            return;
+        }
+        let event = crate::protocol::RequestEvent {
+            cursor: crate::protocol::EventCursor {
+                instance_id: self.instance_id.clone(),
+                sequence: 0,
+            },
+            connection_id: draft.connection_id,
+            request_id: draft.request_id,
+            completed_at_unix_ms: Self::observed_at_unix_ms(),
+            operation: draft.operation.to_owned(),
+            elapsed_micros: elapsed.as_micros() as u64,
+            outcome: draft.outcome.to_owned(),
+            error_code: draft.error_code,
+            result_count: draft.result_count,
+            stage_millis: draft.stage_millis,
+        };
+        self.event_ring.lock().push(event);
     }
 
     pub fn touch(&self) {
         *self.last_request_at.lock() = Instant::now();
     }
 
+    pub fn observed_at_unix_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    pub fn refresh_resources(&self, embedder: &dyn Embedder) {
+        let mut guard = self.cached_resources.lock();
+        if guard.0.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        let sampled_at = Self::observed_at_unix_ms();
+        let usage = embedder.resource_usage();
+        *guard = (
+            Instant::now(),
+            ResourceSnapshot {
+                sampled_at_unix_ms: sampled_at,
+                execution_provider: usage.execution_provider,
+                device_id: usage.device_id,
+                device_name: usage.device_name,
+                device_utilization_percent: usage.device_utilization_percent,
+                device_used_bytes: usage.device_used_bytes,
+                device_total_bytes: usage.device_total_bytes,
+                process_used_bytes: usage.process_used_bytes,
+                process_cpu_percent: usage.process_cpu_percent,
+                model_used_bytes: usage.model_used_bytes,
+            },
+        );
+    }
+
+    pub fn resources_snapshot(&self) -> ResourceSnapshot {
+        let guard = self.cached_resources.lock();
+        let mut snap = guard.1.clone();
+        if snap.sampled_at_unix_ms == 0 {
+            snap.sampled_at_unix_ms = Self::observed_at_unix_ms();
+        }
+        snap
+    }
+
     pub fn status(&self) -> DaemonStatus {
         let uptime = self.started_at.elapsed().as_secs();
         let idle = self.last_request_at.lock().elapsed().as_secs();
+        let observed_at_unix_ms = Self::observed_at_unix_ms();
+        let resources = self.resources_snapshot();
+        let current_progress = self.current_progress.lock().clone();
+        let last_index = self.last_index.lock().clone();
+        let shutting_down = *self.shutting_down.lock();
         let guard = self.serving.read().unwrap();
+        let lifecycle = if shutting_down {
+            Lifecycle::ShuttingDown
+        } else {
+            match &*guard {
+                ServingState::Starting => Lifecycle::Starting,
+                ServingState::Ready(_) => Lifecycle::Ready,
+                ServingState::Indexing(_) => Lifecycle::Indexing,
+                ServingState::Stale(_) => Lifecycle::Stale,
+            }
+        };
         match &*guard {
             ServingState::Starting => DaemonStatus {
-                model_id: String::new(),
-                chunks_live: 0,
-                chunks_dead: 0,
+                lifecycle,
+                instance_id: self.instance_id.clone(),
+                observed_at_unix_ms,
+                model_id: None,
+                chunks_live: None,
+                chunks_dead: None,
                 indexed_commit: None,
-                indexing: false,
-                resident_gpu_bytes: 0,
                 idle_seconds: idle,
                 uptime_seconds: uptime,
+                current_progress,
+                last_index,
+                resources,
             },
             ServingState::Ready(r) => {
-                let r = r.lock().unwrap();
-                let stats = r.store.stats().unwrap_or(storage::StoreStats {
+                let parts = r.parts.lock().unwrap();
+                let stats = parts.store.stats().unwrap_or(storage::StoreStats {
                     live: 0,
                     dead: 0,
                     dead_fraction: 0.0,
                 });
                 DaemonStatus {
-                    model_id: r.embedder.model_id().to_owned(),
-                    chunks_live: stats.live,
-                    chunks_dead: stats.dead,
-                    indexed_commit: r.store.indexed_commit().ok().flatten(),
-                    indexing: false,
-                    resident_gpu_bytes: 0,
+                    lifecycle,
+                    instance_id: self.instance_id.clone(),
+                    observed_at_unix_ms,
+                    model_id: Some(r.search.model_id.clone()),
+                    chunks_live: Some(stats.live),
+                    chunks_dead: Some(stats.dead),
+                    indexed_commit: parts.store.indexed_commit().ok().flatten(),
                     idle_seconds: idle,
                     uptime_seconds: uptime,
+                    current_progress,
+                    last_index,
+                    resources,
                 }
             }
             ServingState::Indexing(f) => DaemonStatus {
-                model_id: f.model_id.clone(),
-                chunks_live: f.chunks_live,
-                chunks_dead: f.chunks_dead,
+                lifecycle,
+                instance_id: self.instance_id.clone(),
+                observed_at_unix_ms,
+                model_id: Some(f.model_id.clone()),
+                chunks_live: Some(f.chunks_live),
+                chunks_dead: Some(f.chunks_dead),
                 indexed_commit: f.indexed_commit.clone(),
-                indexing: true,
-                resident_gpu_bytes: 0,
                 idle_seconds: idle,
                 uptime_seconds: uptime,
+                current_progress,
+                last_index,
+                resources,
             },
             ServingState::Stale(_) => DaemonStatus {
-                model_id: String::new(),
-                chunks_live: 0,
-                chunks_dead: 0,
+                lifecycle,
+                instance_id: self.instance_id.clone(),
+                observed_at_unix_ms,
+                model_id: None,
+                chunks_live: None,
+                chunks_dead: None,
                 indexed_commit: None,
-                indexing: false,
-                resident_gpu_bytes: 0,
                 idle_seconds: idle,
                 uptime_seconds: uptime,
+                current_progress,
+                last_index,
+                resources,
             },
         }
     }
+}
+
+fn new_instance_id() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    Instant::now().hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 impl Resident {
@@ -221,11 +410,10 @@ impl Resident {
         let lexical = LexicalIndex::open(store.dir()).map_err(|e| DaemonError::Internal {
             detail: format!("open lexical: {e}"),
         })?;
-        let dense = DenseIndex::from_store(&store, DenseBackend::Cpu).map_err(|e| {
-            DaemonError::Internal {
+        let dense =
+            DenseIndex::from_store(&store, dense_backend()).map_err(|e| DaemonError::Internal {
                 detail: format!("open dense: {e}"),
-            }
-        })?;
+            })?;
         let identity = StoreIdentity::capture(store_dir, embedder.model_id())?;
         Ok(Self {
             store,
@@ -279,59 +467,94 @@ impl Resident {
     }
 }
 
-/// Split a ready resident into a frozen search view plus parts for indexing.
-pub fn split_for_index(
-    resident: Resident,
-) -> Result<(FrozenSearch, ChunkStore, PathBuf, Arc<dyn Embedder>), DaemonError> {
-    let stats = resident.store.stats().map_err(|e| DaemonError::Internal {
+impl Resident {
+    pub fn into_ready(self) -> Result<ReadyResident, DaemonError> {
+        let Resident {
+            store,
+            lexical,
+            dense,
+            embedder,
+            identity,
+            repo_dir,
+        } = self;
+        let frozen = freeze_search(&store, &lexical, dense, Arc::clone(&embedder), identity)?;
+        Ok(ReadyResident {
+            search: Arc::new(frozen),
+            parts: Mutex::new(ResidentParts {
+                store,
+                lexical,
+                embedder,
+                repo_dir,
+            }),
+        })
+    }
+}
+
+fn freeze_search(
+    store: &ChunkStore,
+    lexical: &LexicalIndex,
+    dense: DenseIndex,
+    embedder: Arc<dyn Embedder>,
+    identity: StoreIdentity,
+) -> Result<FrozenSearch, DaemonError> {
+    let stats = store.stats().map_err(|e| DaemonError::Internal {
         detail: format!("stats: {e}"),
     })?;
-    let indexed_commit = resident.store.indexed_commit().ok().flatten();
-    let live_rows = resident
-        .store
-        .live_rows()
+    let indexed_commit = store.indexed_commit().ok().flatten();
+    let metadata = SnapshotReader::open(store.dir()).map_err(|e| DaemonError::Internal {
+        detail: format!("snapshot metadata reader: {e}"),
+    })?;
+    let frozen_lexical = lexical
+        .frozen_search_handle()
         .map_err(|e| DaemonError::Internal {
-            detail: format!("live_rows: {e}"),
+            detail: format!("frozen lexical reader: {e}"),
         })?;
-    let got = resident
-        .store
-        .get_many(&live_rows)
-        .map_err(|e| DaemonError::Internal {
-            detail: format!("get_many: {e}"),
-        })?;
-    let body_list = resident
-        .lexical
-        .bodies(&live_rows)
-        .map_err(|e| DaemonError::Internal {
-            detail: format!("bodies: {e}"),
-        })?;
-    let mut records = HashMap::new();
-    let mut bodies = HashMap::new();
-    for ((row, rec), body) in live_rows.iter().zip(got).zip(body_list) {
-        if let Some(rec) = rec {
-            let id = row.get();
-            if let Some(b) = body {
-                bodies.insert(id, b);
-            }
-            records.insert(id, rec);
-        }
-    }
-    let lexical_handle = resident.lexical.search_handle();
-    let frozen = FrozenSearch {
-        dense: resident.dense,
-        lexical: lexical_handle,
-        records,
-        bodies,
-        embedder: Arc::clone(&resident.embedder),
-        identity: resident.identity.clone(),
-        model_id: resident.embedder.model_id().to_owned(),
+    Ok(FrozenSearch {
+        dense,
+        lexical: frozen_lexical,
+        metadata,
+        model_id: embedder.model_id().to_owned(),
+        embedder,
+        identity,
         chunks_live: stats.live,
         chunks_dead: stats.dead,
         indexed_commit,
-    };
-    // Drop the lexical writer so Indexer can reopen it.
-    drop(resident.lexical);
-    Ok((frozen, resident.store, resident.repo_dir, resident.embedder))
+    })
+}
+
+/// Split a ready resident into the immutable search view and mutable index owner.
+pub fn split_for_index(ready: ReadyResident) -> Result<IndexParts, DaemonError> {
+    let search = ready.search;
+    let parts = ready
+        .parts
+        .into_inner()
+        .map_err(|_| DaemonError::Internal {
+            detail: "resident parts lock poisoned".into(),
+        })?;
+    Ok((
+        search,
+        parts.store,
+        parts.lexical,
+        parts.repo_dir,
+        parts.embedder,
+    ))
+}
+
+pub fn restore_after_failed_refresh(
+    snapshot: Arc<FrozenSearch>,
+    repo_dir: PathBuf,
+    embedder: Arc<dyn Embedder>,
+) -> Result<ReadyResident, DaemonError> {
+    let resident = Resident::load(&snapshot.identity.canonical_path, &repo_dir, embedder)?;
+    Ok(ReadyResident {
+        search: snapshot,
+        parts: Mutex::new(ResidentParts {
+            store: resident.store,
+            lexical: resident.lexical,
+            embedder: resident.embedder,
+            repo_dir: resident.repo_dir,
+        }),
+    })
 }
 
 pub fn rebuild_resident(
@@ -344,7 +567,7 @@ pub fn rebuild_resident(
         detail: format!("live mask: {e}"),
     })?;
     let mut dense =
-        DenseIndex::from_store(&store, DenseBackend::Cpu).map_err(|e| DaemonError::Internal {
+        DenseIndex::from_store(&store, dense_backend()).map_err(|e| DaemonError::Internal {
             detail: format!("dense: {e}"),
         })?;
     dense
@@ -371,17 +594,9 @@ impl FrozenSearch {
         fusion: &FusionConfig,
     ) -> Result<SearchResponse, DaemonError> {
         self.identity.check_still_valid()?;
-        search_with_parts(
-            self.embedder.as_ref(),
-            &self.lexical,
-            &self.dense,
-            &self.records,
-            &self.bodies,
-            query,
-            top_k,
-            fusion,
-            Role::Query,
-        )
+        Searcher::from_backend(self, self.embedder.as_ref())
+            .search(query, top_k, fusion)
+            .map_err(map_retrieval_err)
     }
 
     pub fn search_similar(
@@ -391,26 +606,29 @@ impl FrozenSearch {
         fusion: &FusionConfig,
     ) -> Result<SearchResponse, DaemonError> {
         self.identity.check_still_valid()?;
-        search_with_parts(
-            self.embedder.as_ref(),
-            &self.lexical,
-            &self.dense,
-            &self.records,
-            &self.bodies,
-            code,
-            top_k,
-            fusion,
-            Role::Document,
-        )
+        Searcher::from_backend(self, self.embedder.as_ref())
+            .search_similar(code, top_k, fusion)
+            .map_err(map_retrieval_err)
     }
 
     pub fn get_symbol(&self, file: &str, symbol: &str) -> Result<Response, DaemonError> {
         self.identity.check_still_valid()?;
-        let matches: Vec<(u64, &ChunkRecord)> = self
-            .records
-            .iter()
-            .filter(|(_, r)| r.file == file && r.symbol == symbol)
-            .map(|(id, r)| (*id, r))
+        let rows = self
+            .metadata
+            .rows_for_file(file)
+            .map_err(|e| DaemonError::Internal {
+                detail: format!("rows_for_file: {e}"),
+            })?;
+        let records = self
+            .metadata
+            .get_many(&rows)
+            .map_err(|e| DaemonError::Internal {
+                detail: format!("get_many: {e}"),
+            })?;
+        let matches: Vec<(RowId, ChunkRecord)> = rows
+            .into_iter()
+            .zip(records)
+            .filter_map(|(row, rec)| rec.filter(|r| r.symbol == symbol).map(|r| (row, r)))
             .collect();
         match matches.len() {
             0 => Err(DaemonError::SymbolNotFound {
@@ -418,8 +636,15 @@ impl FrozenSearch {
                 symbol: symbol.into(),
             }),
             1 => {
-                let (row, rec) = matches[0];
-                let body = self.bodies.get(&row).cloned().unwrap_or_default();
+                let (row, rec) = &matches[0];
+                let body = self
+                    .lexical
+                    .bodies(&[*row])
+                    .map_err(map_retrieval_err)?
+                    .into_iter()
+                    .next()
+                    .flatten()
+                    .unwrap_or_default();
                 Ok(Response::Symbol {
                     file: rec.file.clone(),
                     symbol: rec.symbol.clone(),
@@ -442,84 +667,6 @@ impl FrozenSearch {
             }
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn search_with_parts(
-    embedder: &dyn Embedder,
-    lexical: &LexicalSearchHandle,
-    dense: &DenseIndex,
-    records: &HashMap<u64, ChunkRecord>,
-    bodies: &HashMap<u64, String>,
-    text: &str,
-    top_k: usize,
-    fusion: &FusionConfig,
-    role: Role,
-) -> Result<SearchResponse, DaemonError> {
-    let total = Instant::now();
-    let embed_started = Instant::now();
-    let embedded = embedder.embed(&[text], role).map_err(map_infer_err)?;
-    let embed_millis = embed_started.elapsed().as_millis() as u64;
-    let vector = &embedded[0].vector;
-
-    let lex_started = Instant::now();
-    let (lexical_rows, lexical_error) = match lexical.search(text, fusion.lexical_depth) {
-        Ok(rows) => (rows, None),
-        Err(e) => (Vec::new(), Some(e.to_string())),
-    };
-    let lexical_millis = lex_started.elapsed().as_millis() as u64;
-
-    let dense_started = Instant::now();
-    let (dense_rows, dense_error) =
-        match dense.search(vector, embedder.model_id(), fusion.dense_depth) {
-            Ok(rows) => (rows, None),
-            Err(e) => (Vec::new(), Some(e.to_string())),
-        };
-    let dense_millis = dense_started.elapsed().as_millis() as u64;
-
-    let fuse_started = Instant::now();
-    let fused = fuse(&lexical_rows, &dense_rows, fusion);
-    let fuse_millis = fuse_started.elapsed().as_millis() as u64;
-
-    let assemble_started = Instant::now();
-    let mut results = Vec::new();
-    for row in fused.into_iter().take(top_k) {
-        let id = row.row.get();
-        let Some(record) = records.get(&id) else {
-            continue;
-        };
-        let body = bodies.get(&id).map(String::as_str).unwrap_or("");
-        results.push(SearchResult {
-            file: record.file.clone(),
-            symbol: record.symbol.clone(),
-            signature: record.signature.clone(),
-            doc: record.doc_first_line.clone(),
-            preview: preview_from_body(body),
-            lines: [record.line_start, record.line_end],
-            lexical_score: row.lexical.score,
-            dense_score: row.dense.score,
-            fused_score: row.fused_score,
-        });
-    }
-    let assemble_millis = assemble_started.elapsed().as_millis() as u64;
-
-    Ok(SearchResponse {
-        results,
-        diagnostics: SearchDiagnostics {
-            lexical_ok: lexical_error.is_none(),
-            dense_ok: dense_error.is_none(),
-            lexical_error,
-            dense_error,
-            stage_millis: StageTimings {
-                embed: embed_millis,
-                lexical: lexical_millis,
-                dense: dense_millis,
-                fuse: fuse_millis,
-                assemble: assemble_millis,
-                total: total.elapsed().as_millis() as u64,
-            },
-        },
-    })
 }
 
 pub fn resolve_symbol(
