@@ -52,6 +52,7 @@ async fn setup() -> (tempfile::TempDir, Router, String, Value) {
         listen: "127.0.0.1:7442".parse().unwrap(),
         database_path: t.path().join("state/console.sqlite3"),
         asset_path: t.path().join("assets"),
+        collect: true,
     };
     let app = console::api::application(config).await.unwrap();
     let (_, session) = request(&app, "GET", "/api/v1/session", "", Value::Null).await;
@@ -230,6 +231,126 @@ async fn search_and_similar_preserve_daemon_records_and_reject_operation_paths()
         .0,
         StatusCode::NOT_FOUND
     );
+
+    // Limit validation: integer 1-20
+    for invalid_top_k in [json!(0), json!(21), json!(-1), json!(5.5), json!("5")] {
+        for (action, body) in [
+            ("search", json!({"query":"test","top_k":invalid_top_k})),
+            ("similar", json!({"code":"test","top_k":invalid_top_k})),
+        ] {
+            let (status, err) = request(
+                &app,
+                "POST",
+                &format!("/api/v1/repositories/{id}/{action}"),
+                &token,
+                body,
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{action} with top_k={invalid_top_k} should be 400: {err}"
+            );
+        }
+    }
+
+    // Valid limits: 1, 20, and default (omitted -> 5)
+    for valid_body in [
+        json!({"query":"test","top_k":1}),
+        json!({"query":"test","top_k":20}),
+        json!({"query":"test"}),
+    ] {
+        let (status, _) = request(
+            &app,
+            "POST",
+            &format!("/api/v1/repositories/{id}/search"),
+            &token,
+            valid_body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn symbol_retrieval_success_not_found_and_ambiguous() {
+    let (_t, app, token, r) = setup().await;
+    let id = r["id"].as_str().unwrap();
+    let socket = daemon::paths::socket_path_for_store(std::path::Path::new(
+        r["config"]["store_path"].as_str().unwrap(),
+    ))
+    .unwrap();
+
+    // 1. Success case
+    let sym_reply = Response::Symbol {
+        file: "src/lib.rs".into(),
+        symbol: "run".into(),
+        language: "rust".into(),
+        signature: "pub fn run()".into(),
+        lines: [10, 25],
+        body: "pub fn run() {\n    println!(\"hello\");\n}".into(),
+    };
+    let mock = support::MockDaemon::bind(socket.clone(), sym_reply).await;
+    let (status, body) = request(
+        &app,
+        "POST",
+        &format!("/api/v1/repositories/{id}/symbol"),
+        &token,
+        json!({"file":"src/lib.rs","symbol":"run"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["symbol"], "run");
+    assert_eq!(body["lines"], json!([10, 25]));
+    assert_eq!(body["body"], "pub fn run() {\n    println!(\"hello\");\n}");
+    drop(mock);
+
+    // 2. SymbolNotFound (404)
+    let not_found_reply = Response::Error(daemon::DaemonError::SymbolNotFound {
+        file: "src/lib.rs".into(),
+        symbol: "missing".into(),
+    });
+    let mock = support::MockDaemon::bind(socket.clone(), not_found_reply).await;
+    let (status, body) = request(
+        &app,
+        "POST",
+        &format!("/api/v1/repositories/{id}/symbol"),
+        &token,
+        json!({"file":"src/lib.rs","symbol":"missing"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "symbol_not_found");
+    drop(mock);
+
+    // 3. SymbolAmbiguous (409 with candidates)
+    let ambiguous_reply = Response::Error(daemon::DaemonError::SymbolAmbiguous {
+        file: "src/lib.rs".into(),
+        symbol: "overloaded".into(),
+        candidates: vec![
+            "src/lib.rs:fn overloaded()".into(),
+            "src/lib.rs:fn overloaded(x: i32)".into(),
+        ],
+    });
+    let mock = support::MockDaemon::bind(socket.clone(), ambiguous_reply).await;
+    let (status, body) = request(
+        &app,
+        "POST",
+        &format!("/api/v1/repositories/{id}/symbol"),
+        &token,
+        json!({"file":"src/lib.rs","symbol":"overloaded"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "symbol_ambiguous");
+    assert_eq!(
+        body["candidates"],
+        json!([
+            "src/lib.rs:fn overloaded()",
+            "src/lib.rs:fn overloaded(x: i32)"
+        ])
+    );
+    drop(mock);
 }
 #[tokio::test]
 async fn protocol_mismatch_never_replaces_daemon() {

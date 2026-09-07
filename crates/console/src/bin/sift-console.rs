@@ -19,9 +19,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config.database_path =
                     PathBuf::from(args.next().ok_or("--database requires a path")?)
             }
+            "--collect" => {
+                let mode = args.next().ok_or("--collect requires on or off")?;
+                match mode.as_str() {
+                    "on" => config.collect = true,
+                    "off" => config.collect = false,
+                    _ => {
+                        return Err(format!(
+                            "invalid --collect value: {mode} (expected 'on' or 'off')"
+                        )
+                        .into());
+                    }
+                }
+            }
             "--help" => {
                 println!(
-                    "sift-console --listen 127.0.0.1:7331 --assets ui/dist --database console.sqlite3"
+                    "sift-console --listen 127.0.0.1:7331 --assets ui/dist --database console.sqlite3 --collect on"
                 );
                 return Ok(());
             }

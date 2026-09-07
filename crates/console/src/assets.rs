@@ -5,13 +5,45 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use std::path::{Component, Path, PathBuf};
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Assets {
     root: PathBuf,
 }
 impl Assets {
     pub fn open(path: &Path) -> Result<Self, std::io::Error> {
-        let root = path.canonicalize()?;
+        let candidate = if path.join("index.html").is_file() {
+            Some(path.to_path_buf())
+        } else if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                if parent.join("ui/index.html").is_file() {
+                    Some(parent.join("ui"))
+                } else if parent.join("index.html").is_file() {
+                    Some(parent.to_path_buf())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let root = match candidate {
+            Some(p) => p.canonicalize().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("Frontend assets are missing; build ui and supply --assets. ({e})"),
+                )
+            })?,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Frontend assets are missing; build ui and supply --assets.",
+                ));
+            }
+        };
+
         if !root.is_dir() || !root.join("index.html").is_file() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,

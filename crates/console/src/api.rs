@@ -68,7 +68,9 @@ pub async fn application(config: ConsoleConfig) -> Result<Router, Box<dyn std::e
         csrf: security.csrf.clone(),
         events: event_tx.clone(),
     });
-    start_collector(Arc::downgrade(&state));
+    if config.collect {
+        start_collector(Arc::downgrade(&state));
+    }
     let api = Router::new()
         .route("/session", get(get_session))
         .route("/health", get(health))
@@ -369,6 +371,7 @@ async fn search(
     Path(id): Path<String>,
     Json(v): Json<SearchInput>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::api::types::validate_top_k(v.top_k)?;
     search_action(
         &s,
         id,
@@ -384,6 +387,7 @@ async fn similar(
     Path(id): Path<String>,
     Json(v): Json<SimilarInput>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::api::types::validate_top_k(v.top_k)?;
     search_action(
         &s,
         id,

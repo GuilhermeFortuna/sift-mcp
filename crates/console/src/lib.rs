@@ -18,6 +18,7 @@ pub struct ConsoleConfig {
     pub listen: SocketAddr,
     pub database_path: PathBuf,
     pub asset_path: PathBuf,
+    pub collect: bool,
 }
 impl Default for ConsoleConfig {
     fn default() -> Self {
@@ -25,6 +26,7 @@ impl Default for ConsoleConfig {
             listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7331),
             database_path: PathBuf::from("console.sqlite3"),
             asset_path: PathBuf::from("ui/dist"),
+            collect: true,
         }
     }
 }

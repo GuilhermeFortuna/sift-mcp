@@ -5,8 +5,44 @@ import { AppShell } from './components/AppShell';
 import { RepositoriesPage } from './pages/RepositoriesPage';
 import { RepositoryDetailPage } from './pages/RepositoryDetailPage';
 import { RepositoryFormPage } from './pages/RepositoryFormPage';
+import { SearchPage } from './pages/SearchPage';
 import './styles.css';
 
-function Router() { const [path, setPath] = useState(window.location.pathname); useEffect(() => { const onPop = () => setPath(window.location.pathname); window.addEventListener('popstate', onPop); return () => window.removeEventListener('popstate', onPop); }, []); useEffect(() => { document.title = path.startsWith('/repositories/') ? 'Repository · Sift Console' : 'Repositories · Sift Console'; }, [path]); if (path === '/repositories/new') return <RepositoryFormPage />; const match = path.match(/^\/repositories\/([^/]+)(\/edit)?$/); if (match) return match[2] ? <RepositoryFormPage id={match[1]} /> : <RepositoryDetailPage id={match[1]} />; return <RepositoriesPage />; }
+function Router() {
+  const [path, setPath] = useState(window.location.pathname);
+
+  useEffect(() => {
+    const onPop = () => setPath(window.location.pathname);
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
+  useEffect(() => {
+    if (path.startsWith('/search')) {
+      document.title = 'Search Lab · Sift Console';
+    } else if (path.startsWith('/repositories/')) {
+      document.title = 'Repository · Sift Console';
+    } else {
+      document.title = 'Repositories · Sift Console';
+    }
+  }, [path]);
+
+  if (path === '/search' || path.startsWith('/search')) {
+    return <SearchPage />;
+  }
+  if (path === '/repositories/new') {
+    return <RepositoryFormPage />;
+  }
+  const match = path.match(/^\/repositories\/([^/]+)(\/edit)?$/);
+  if (match) {
+    return match[2] ? <RepositoryFormPage id={match[1]} /> : <RepositoryDetailPage id={match[1]} />;
+  }
+  return <RepositoriesPage />;
+}
+
 void session().catch(() => undefined);
-createRoot(document.getElementById('root')!).render(<AppShell><Router /></AppShell>);
+createRoot(document.getElementById('root')!).render(
+  <AppShell>
+    <Router />
+  </AppShell>
+);

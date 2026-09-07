@@ -21,6 +21,8 @@ export ORT_CUDA_VERSION=12
 
 cargo fmt --all -- --check
 bash -n scripts/sift
+bash -n scripts/package-console.sh
+bash -n scripts/measure-console-overhead.sh
 cargo check -p daemon --features cuda --bin sift-daemon
 cargo check -p eval --features cuda --example evaluate
 cargo check -p eval --features cuda --example proxy_kpi

@@ -1,6 +1,6 @@
 export interface RegistrationInput { name: string; repo_path: string; store_path: string; model_path: string; daemon_path: string }
 export interface Registration { id: string; config: RegistrationInput }
-export interface ApiError { code: string; message: string; retryable: boolean }
+export interface ApiError { code: string; message: string; retryable: boolean; candidates?: string[] }
 export type Lifecycle = 'starting' | 'ready' | 'indexing' | 'stale' | 'shutting_down';
 export interface Freshness { head: string | null; indexed_commit: string | null; dirty: boolean | null; unavailable_reason: string | null; inspected_at_unix_ms: number }
 export interface IndexProgress { phase: string; done: number; total: number | null; connection_id?: number; request_id?: number }
@@ -19,3 +19,11 @@ export interface Gap { repository_id: string; from_unix_ms: number; to_unix_ms: 
 export interface ResourceSample { repository_id: string; resources: Record<string, unknown> }
 export interface MetricBucket { from_unix_ms: number; to_unix_ms: number; request_count: number; sample_count: number; coverage_seconds: number; rate_per_second: number | null; p50_micros: number | null; p95_micros: number | null; resources: ResourceSample[] }
 export interface MetricsResponse { buckets: MetricBucket[]; coverage_seconds: number; gap_markers: Gap[]; sample_count: number }
+export interface SearchInput { query: string; top_k: number }
+export interface SimilarInput { code: string; top_k: number }
+export interface SymbolInput { file: string; symbol: string }
+export interface SearchResult { file: string; symbol: string; signature: string; doc: string | null; preview: string; lines: [number, number]; lexical_score: number | null; dense_score: number | null; fused_score: number }
+export interface StageTimings { embed: number; lexical: number; dense: number; fuse: number; assemble: number; total: number }
+export interface SearchDiagnostics { lexical_ok: boolean; dense_ok: boolean; lexical_error: string | null; dense_error: string | null; stage_millis: StageTimings }
+export interface SearchResponse { results: SearchResult[]; diagnostics: SearchDiagnostics }
+export interface SymbolResponse { file: string; symbol: string; language: string; signature: string; lines: [number, number]; body: string }

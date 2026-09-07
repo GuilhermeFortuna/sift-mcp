@@ -11,6 +11,8 @@ pub struct ApiError {
     pub code: String,
     pub message: String,
     pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidates: Option<Vec<String>>,
 }
 impl ApiError {
     pub fn new(code: &str, message: impl Into<String>, retryable: bool) -> Self {
@@ -18,6 +20,7 @@ impl ApiError {
             code: code.into(),
             message: message.into(),
             retryable,
+            candidates: None,
         }
     }
     pub fn invalid(message: &str) -> Self {
@@ -87,11 +90,15 @@ impl From<daemon::DaemonError> for ApiError {
                 "The symbol was not found in the current index.".into(),
                 false,
             ),
-            SymbolAmbiguous { .. } => (
-                "symbol_ambiguous",
-                "The symbol is ambiguous; specify its qualified name.".into(),
-                false,
-            ),
+            SymbolAmbiguous { candidates, .. } => {
+                let mut err = Self::new(
+                    "symbol_ambiguous",
+                    "The symbol is ambiguous; specify its qualified name.",
+                    false,
+                );
+                err.candidates = Some(candidates);
+                return err;
+            }
             StoreStale { .. } => (
                 "store_stale",
                 "The index is stale; explicitly index the registered repository.".into(),
@@ -256,4 +263,12 @@ pub enum IndexMode {
 }
 fn default_top_k() -> usize {
     5
+}
+pub fn validate_top_k(top_k: usize) -> Result<(), ApiError> {
+    if !(1..=20).contains(&top_k) {
+        return Err(ApiError::invalid(
+            "limit must be an integer between 1 and 20",
+        ));
+    }
+    Ok(())
 }
