@@ -123,6 +123,29 @@ fn counters_reconcile_after_index_all() {
 }
 
 #[test]
+fn duplicate_content_reuses_embedding_across_flush_batches() {
+    let body = sample_fn("shared");
+    let h = Harness::new(&[CommitSpec::new("init")
+        .file("a.rs", body.clone())
+        .file("b.rs", body)]);
+    let mut indexer = h.indexer(IndexConfig {
+        embed_batch: 1,
+        ..IndexConfig::default()
+    });
+    let report = indexer.index_all(&mut NullProgress).unwrap();
+
+    assert!(report.chunks_added >= 2);
+    let a = indexer.store().rows_for_file("a.rs").unwrap();
+    let b = indexer.store().rows_for_file("b.rs").unwrap();
+    assert!(!a.is_empty());
+    assert!(!b.is_empty());
+    let ah = indexer.store().get(a[0]).unwrap().unwrap().content_hash;
+    let bh = indexer.store().get(b[0]).unwrap().unwrap().content_hash;
+    assert_eq!(ah, bh, "identical occurrences must share content hash");
+    assert_eq!(report.embeddings_computed, 1, "{report:?}");
+}
+
+#[test]
 fn noop_reindex_embeds_nothing() {
     let h = Harness::new(&[CommitSpec::new("init")
         .file("a.rs", sample_fn("a"))

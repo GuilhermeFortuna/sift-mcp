@@ -3,7 +3,13 @@
 *.onnx
 /index/
 /store/
+/.sift-store/
+/console.lock
+/console.sqlite3*
 /.ort/
 /onnxruntime/
 /tools/.venv/
 __pycache__/
+/node_modules/
+ui/node_modules/
+ui/dist/

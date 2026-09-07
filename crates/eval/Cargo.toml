@@ -4,6 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 publish = false
 
+[features]
+default = []
+cuda = ["inference/cuda", "retrieval/cuda"]
+
 [dependencies]
 storage = { path = "../storage" }
 indexing = { path = "../indexing" }
@@ -24,6 +28,8 @@ name = "mine"
 
 [[example]]
 name = "evaluate"
+required-features = ["cuda"]
 
 [[example]]
 name = "proxy_kpi"
+required-features = ["cuda"]

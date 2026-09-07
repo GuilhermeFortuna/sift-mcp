@@ -1,0 +1,329 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+STATE_ROOT=${SIFT_STATE_DIR:-${XDG_STATE_HOME:-${HOME:-$ROOT_DIR/.local/state}}/sift}
+CONSOLE_PID_FILE=$STATE_ROOT/console.pid
+VITE_PID_FILE=$STATE_ROOT/vite.pid
+CONSOLE_LOG=$STATE_ROOT/console.log
+VITE_LOG=$STATE_ROOT/vite.log
+CONSOLE_URL=http://127.0.0.1:7331
+VITE_URL=${SIFT_VITE_URL:-http://127.0.0.1:5173}
+CONSOLE_BIN=$ROOT_DIR/target/release/sift-console
+DAEMON_BIN=$ROOT_DIR/target/release/sift-daemon
+UI_DIR=$ROOT_DIR/ui
+UI_DIST=$UI_DIR/dist
+
+usage() {
+    cat <<'EOF'
+Usage: ./scripts/sift <command>
+
+Commands:
+  run       Build stale UI/Console assets, then start the local Console
+  dev       Start the Console and Vite hot-reload server
+  daemon    Run the CUDA daemon in the foreground using SIFT_* variables
+  console   Run the Console in the foreground, passing through its options
+  build     Build the UI and all release binaries
+  stop      Stop only Console/Vite processes launched by this script
+  status    Show only Console/Vite processes owned by this script
+  logs      Show recent logs for Console/Vite processes owned by this script
+
+Optional run/dev variable: SIFT_STATE_DIR.
+Daemon variables: SIFT_REPO, SIFT_MODEL, and SIFT_STORE.
+EOF
+}
+
+die() {
+    echo "sift: $*" >&2
+    exit 1
+}
+
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+ensure_state_dir() {
+    mkdir -p "$STATE_ROOT"
+}
+
+pid_value() {
+    local file=$1
+    [[ -s "$file" ]] && tr -d '[:space:]' < "$file"
+}
+
+pid_alive() {
+    local pid=$1
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
+owned_pid_alive() {
+    local file=$1
+    local pid
+    pid=$(pid_value "$file" || true)
+    [[ -n "$pid" ]] && pid_alive "$pid"
+}
+
+start_detached() {
+    local log_file=$1
+    shift
+    if command_exists setsid; then
+        nohup setsid --wait "$@" >>"$log_file" 2>&1 < /dev/null &
+    else
+        nohup "$@" >>"$log_file" 2>&1 < /dev/null &
+    fi
+    DETACHED_PID=$!
+}
+
+status_line() {
+    local marker=✓
+    case "$2" in
+        unavailable|not\ configured|metadata\ unavailable|stopped) marker=! ;;
+        *"daemon on demand"*) marker=· ;;
+    esac
+    printf '  %s %-9s %s\n' "$marker" "$1" "$2"
+}
+
+ui_needs_build() {
+    [[ ! -f "$UI_DIST/index.html" ]] ||
+        find "$UI_DIR" -maxdepth 2 -type f \
+            \( -path "$UI_DIR/src/*" -o -name 'index.html' -o -name 'package.json' \
+            -o -name 'pnpm-lock.yaml' -o -name 'tsconfig.json' -o -name 'vite.config.ts' \) \
+            -newer "$UI_DIST/index.html" -print -quit | grep -q .
+}
+
+ensure_ui() {
+    if ! command_exists corepack; then
+        die "corepack is required to build the UI"
+    fi
+    if [[ ! -d "$UI_DIR/node_modules" ]]; then
+        echo "Preparing UI dependencies..."
+        corepack pnpm@10.11.0 --dir "$UI_DIR" install --frozen-lockfile
+    fi
+    if ui_needs_build; then
+        echo "Building UI..."
+        corepack pnpm@10.11.0 --dir "$UI_DIR" build
+    fi
+}
+
+ensure_console_binary() {
+    if [[ ! -x "$CONSOLE_BIN" ]]; then
+        echo "Building Console..."
+        cargo build --release -p console --bin sift-console
+    fi
+}
+
+ensure_daemon_binary() {
+    if [[ ! -x "$DAEMON_BIN" ]]; then
+        echo "Building CUDA daemon..."
+        ORT_CUDA_VERSION=${ORT_CUDA_VERSION:-12} cargo build --release -p daemon --bin sift-daemon --features cuda
+    fi
+}
+
+ensure_release_build() {
+    ensure_ui
+    echo "Building release binaries..."
+    cargo build --release -p console --bin sift-console
+    cargo build --release -p mcp-client --bin mcp-client
+    ORT_CUDA_VERSION=${ORT_CUDA_VERSION:-12} cargo build --release -p daemon --bin sift-daemon --features cuda
+}
+
+gpu_name() {
+    local value
+    value=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sed -n '1p' || true)
+    [[ -n "$value" ]] && printf '%s' "$value" || printf '%s' 'unavailable'
+}
+
+cudnn_state() {
+    local entries
+    entries=$(ldconfig -p 2>/dev/null || true)
+    [[ "$entries" == *libcudnn.so* ]] && printf '%s' 'available' || printf '%s' 'unavailable'
+}
+
+model_state() {
+    local model_dir=${SIFT_MODEL:-}
+    local metadata
+    local model_id
+    if [[ -z "$model_dir" || ! -f "$model_dir/metadata.json" ]]; then
+        printf '%s' 'not configured'
+        return
+    fi
+    metadata=$(<"$model_dir/metadata.json")
+    model_id=$(sed -n 's/.*"model_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<< "$metadata" | sed -n '1p')
+    [[ -n "$model_id" ]] && printf '%s' "$model_id" || printf '%s' 'metadata unavailable'
+}
+
+print_startup() {
+    local gpu
+    gpu=$(gpu_name)
+    echo
+    echo "Sift"
+    echo "Local Code Intelligence"
+    if [[ "$gpu" == unavailable ]]; then
+        status_line "GPU" "unavailable"
+    else
+        status_line "GPU" "$gpu"
+    fi
+    status_line "Provider" "CUDA (daemon on demand)"
+    status_line "cuDNN" "$(cudnn_state)"
+    status_line "Model" "$(model_state)"
+    status_line "UI" "ready"
+    status_line "Console" "$CONSOLE_URL"
+}
+
+wait_for_console() {
+    local attempt
+    if ! command_exists curl; then
+        sleep 0.5
+        owned_pid_alive "$CONSOLE_PID_FILE"
+        return
+    fi
+    for attempt in $(seq 1 40); do
+        if curl --silent --fail --max-time 1 "$CONSOLE_URL/api/v1/health" >/dev/null 2>&1; then
+            return 0
+        fi
+        if ! owned_pid_alive "$CONSOLE_PID_FILE"; then
+            return 1
+        fi
+        sleep 0.25
+    done
+    return 1
+}
+
+start_console() {
+    ensure_state_dir
+    if owned_pid_alive "$CONSOLE_PID_FILE"; then
+        return
+    fi
+    rm -f "$CONSOLE_PID_FILE"
+    start_detached "$CONSOLE_LOG" "$CONSOLE_BIN" \
+        --listen 127.0.0.1:7331 \
+        --assets "$UI_DIST" \
+        --database "$ROOT_DIR/console.sqlite3"
+    echo "$DETACHED_PID" > "$CONSOLE_PID_FILE"
+}
+
+start_vite() {
+    ensure_state_dir
+    if owned_pid_alive "$VITE_PID_FILE"; then
+        return
+    fi
+    rm -f "$VITE_PID_FILE"
+    start_detached "$VITE_LOG" corepack pnpm@10.11.0 --dir "$UI_DIR" dev -- --host 127.0.0.1 --port 5173
+    echo "$DETACHED_PID" > "$VITE_PID_FILE"
+}
+
+stop_pid_file() {
+    local file=$1
+    local pid
+    pid=$(pid_value "$file" || true)
+    [[ -n "$pid" ]] || return 0
+    if pid_alive "$pid"; then
+        kill -- "-$pid" 2>/dev/null || true
+        kill "$pid" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            pid_alive "$pid" || break
+            sleep 0.1
+        done
+        if pid_alive "$pid"; then
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    fi
+    rm -f "$file"
+}
+
+run_command() {
+    ensure_ui
+    ensure_console_binary
+    start_console
+    if ! wait_for_console; then
+        echo "Console failed to become ready; recent log:" >&2
+        tail -n 40 "$CONSOLE_LOG" >&2 || true
+        exit 1
+    fi
+    print_startup
+}
+
+dev_command() {
+    ensure_ui
+    ensure_console_binary
+    start_console
+    start_vite
+    if ! wait_for_console; then
+        echo "Console failed to become ready; recent log:" >&2
+        tail -n 40 "$CONSOLE_LOG" >&2 || true
+        exit 1
+    fi
+    print_startup
+    status_line "Vite" "$VITE_URL"
+}
+
+status_command() {
+    ensure_state_dir
+    if owned_pid_alive "$CONSOLE_PID_FILE"; then
+        status_line "Console" "running ($(pid_value "$CONSOLE_PID_FILE")) $CONSOLE_URL"
+    else
+        status_line "Console" "stopped"
+    fi
+    if owned_pid_alive "$VITE_PID_FILE"; then
+        status_line "Vite" "running ($(pid_value "$VITE_PID_FILE")) $VITE_URL"
+    else
+        status_line "Vite" "stopped"
+    fi
+    status_line "Logs" "$STATE_ROOT"
+}
+
+logs_command() {
+    local found=0
+    for log in "$CONSOLE_LOG" "$VITE_LOG"; do
+        if [[ -f "$log" ]]; then
+            found=1
+            echo "--- $log ---"
+            tail -n "${SIFT_LOG_LINES:-100}" "$log"
+        fi
+    done
+    [[ "$found" -eq 1 ]] || echo "No launcher logs yet."
+}
+
+case "${1:-help}" in
+    run)
+        run_command
+        ;;
+    dev)
+        dev_command
+        ;;
+    daemon)
+        [[ -n "${SIFT_REPO:-}" ]] || die "SIFT_REPO is required for daemon"
+        [[ -n "${SIFT_MODEL:-}" ]] || die "SIFT_MODEL is required for daemon"
+        [[ -n "${SIFT_STORE:-}" ]] || die "SIFT_STORE is required for daemon"
+        ensure_daemon_binary
+        exec "$DAEMON_BIN" --store "$SIFT_STORE" --repo "$SIFT_REPO" --model "$SIFT_MODEL"
+        ;;
+    console)
+        ensure_ui
+        ensure_console_binary
+        shift
+        exec "$CONSOLE_BIN" "$@"
+        ;;
+    build)
+        ensure_release_build
+        ;;
+    stop)
+        stop_pid_file "$VITE_PID_FILE"
+        stop_pid_file "$CONSOLE_PID_FILE"
+        echo "Launcher-owned services stopped."
+        ;;
+    status)
+        status_command
+        ;;
+    logs)
+        logs_command
+        ;;
+    help|-h|--help)
+        usage
+        ;;
+    *)
+        echo "sift: unknown command: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+esac

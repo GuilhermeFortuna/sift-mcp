@@ -76,6 +76,7 @@ impl Harness {
             idle_timeout: Duration::from_secs(60),
             max_concurrent_searches: 4,
             fusion: FusionConfig::default(),
+            record_events: true,
         }
     }
 
@@ -151,7 +152,10 @@ async fn wait_ready(socket: &Path) {
     loop {
         if let Ok(mut c) = DaemonClient::connect(socket).await {
             match c.request(Request::Status).await {
-                Ok(Response::Status(s)) if !s.model_id.is_empty() && !s.indexing => {
+                Ok(Response::Status(s))
+                    if s.model_id.as_ref().is_some_and(|m| !m.is_empty())
+                        && s.lifecycle == daemon::Lifecycle::Ready =>
+                {
                     return;
                 }
                 Ok(Response::Status(_)) => {}
@@ -165,6 +169,38 @@ async fn wait_ready(socket: &Path) {
             panic!("daemon not ready");
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn connect_or_spawn_reports_stderr_when_daemon_exits_before_socket() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let t = tempfile::tempdir().unwrap();
+    let daemon = t.path().join("daemon");
+    std::fs::write(
+        &daemon,
+        "#!/bin/sh\nprintf '%s\\n' 'CUDA provider failed: libcublasLt.so.13' >&2\nexit 17\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&daemon, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let store = t.path().join("store");
+    let repo = t.path().join("repo");
+    let model = t.path().join("model");
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::create_dir(&model).unwrap();
+
+    let result =
+        DaemonClient::connect_or_spawn(&store, &repo, &model, Duration::from_secs(2), &daemon)
+            .await;
+
+    match result {
+        Err(DaemonError::Internal { detail }) => {
+            assert!(detail.contains("exited"), "{detail}");
+            assert!(detail.contains("libcublasLt.so.13"), "{detail}");
+        }
+        Ok(_) => panic!("expected actionable child-exit error, got success"),
+        Err(other) => panic!("expected internal child-exit error, got {other:?}"),
     }
 }
 
@@ -207,6 +243,16 @@ async fn search_over_socket_matches_in_process() {
     match resp {
         Response::Search(got) => {
             assert_eq!(got.results.len(), expected.results.len());
+            assert_eq!(got.diagnostics.lexical_ok, expected.diagnostics.lexical_ok);
+            assert_eq!(got.diagnostics.dense_ok, expected.diagnostics.dense_ok);
+            assert_eq!(
+                got.diagnostics.lexical_error,
+                expected.diagnostics.lexical_error
+            );
+            assert_eq!(
+                got.diagnostics.dense_error,
+                expected.diagnostics.dense_error
+            );
             for (a, b) in got.results.iter().zip(expected.results.iter()) {
                 assert_eq!(a.symbol, b.symbol);
                 assert_eq!(a.file, b.file);
@@ -340,6 +386,11 @@ async fn concurrent_clients_overlap() {
         b0.duration_since(t0),
         b1.duration_since(t0),
         t0
+    );
+    assert!(
+        t0.elapsed() < Duration::from_millis(360),
+        "two 200ms searches should complete concurrently, elapsed={:?}",
+        t0.elapsed()
     );
 }
 
@@ -518,6 +569,104 @@ async fn search_during_index_stays_consistent() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[tokio::test]
+async fn failed_refresh_keeps_previous_snapshot_serving() {
+    let h = Harness::new();
+    let daemon = h.start().await;
+    let socket = h.socket.clone();
+    tokio::spawn(async move {
+        let _ = daemon.serve().await;
+    });
+    wait_ready(&socket).await;
+
+    let mut client = DaemonClient::connect(&socket).await.unwrap();
+    let stream = client
+        .request_streaming(Request::Index {
+            mode: IndexMode::Update,
+            repo_dir: h.repo.path().join("missing-repository"),
+        })
+        .await
+        .unwrap();
+    futures::pin_mut!(stream);
+    let mut saw_error = false;
+    while let Some(frame) = stream.next().await {
+        if matches!(frame, Response::Error(_)) {
+            saw_error = true;
+        }
+    }
+    assert!(saw_error);
+
+    let mut search = DaemonClient::connect(&socket).await.unwrap();
+    let response = search
+        .request(Request::Search {
+            query: "alpha".into(),
+            top_k: 5,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(response, Response::Search(_)), "{response:?}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn search_similar_during_index_does_not_block_runtime() {
+    let h = Harness::new();
+    let daemon = h.start().await;
+    *daemon.state.index_phase_delay.lock() = Some(Duration::from_millis(300));
+    *daemon.state.search_delay.lock() = Some(Duration::from_millis(200));
+    let socket = h.socket.clone();
+    tokio::spawn(async move {
+        let _ = daemon.serve().await;
+    });
+    wait_ready(&socket).await;
+
+    let index_socket = socket.clone();
+    let repo_dir = h.repo.path().to_path_buf();
+    let indexer = tokio::spawn(async move {
+        let mut client = DaemonClient::connect(&index_socket).await.unwrap();
+        let stream = client
+            .request_streaming(Request::Index {
+                mode: IndexMode::Full,
+                repo_dir,
+            })
+            .await
+            .unwrap();
+        futures::pin_mut!(stream);
+        while stream.next().await.is_some() {}
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let similar_socket = socket.clone();
+    let similar = tokio::spawn(async move {
+        let mut client = DaemonClient::connect(&similar_socket).await.unwrap();
+        client
+            .request(Request::SearchSimilar {
+                code: "pub fn alpha() {}".into(),
+                top_k: 3,
+            })
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(
+        !similar.is_finished(),
+        "the delayed similar search should still be running"
+    );
+
+    let status_started = Instant::now();
+    let mut status_client = DaemonClient::connect(&socket).await.unwrap();
+    let status = tokio::time::timeout(
+        Duration::from_millis(100),
+        status_client.request(Request::Status),
+    )
+    .await
+    .expect("status should not wait for similar search")
+    .unwrap();
+    assert!(matches!(status, Response::Status(_)));
+    assert!(status_started.elapsed() < Duration::from_millis(100));
+
+    assert!(matches!(similar.await.unwrap(), Ok(Response::Search(_))));
+    let _ = indexer.await;
 }
 
 #[tokio::test]
@@ -724,6 +873,7 @@ async fn gpu_unavailable_is_typed() {
         idle_timeout: Duration::from_secs(60),
         max_concurrent_searches: 4,
         fusion: FusionConfig::default(),
+        record_events: true,
     };
     let daemon = Daemon::bind(config, boom as Arc<dyn Embedder>)
         .await
@@ -763,4 +913,355 @@ async fn request_emits_structured_log() {
         .await
         .unwrap();
     // log_request is invoked on every request path (see server.rs).
+}
+
+#[tokio::test]
+async fn observer_polling_does_not_extend_idle_timeout() {
+    let h = Harness::new();
+    let mut config = h.config();
+    config.idle_timeout = Duration::from_secs(1);
+    let daemon = Daemon::bind(config, Arc::clone(&h.embedder) as Arc<dyn Embedder>)
+        .await
+        .unwrap();
+    let socket = h.socket.clone();
+    let serve = tokio::spawn(async move { daemon.serve().await });
+    wait_ready(&socket).await;
+
+    let s = socket.clone();
+    let observer = tokio::spawn(async move {
+        let mut obs = DaemonClient::connect_observer(&s).await.unwrap();
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(3) {
+            let _ = obs.observe(None).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+
+    let finished = tokio::time::timeout(Duration::from_secs(2), serve).await;
+    assert!(
+        finished.is_ok(),
+        "daemon should idle-exit within 2s despite observer polls"
+    );
+    let _ = observer.await;
+}
+
+#[tokio::test]
+async fn observer_forbidden_operations_and_disconnect_do_not_extend_idle() {
+    let h = Harness::new();
+    let mut config = h.config();
+    config.idle_timeout = Duration::from_secs(1);
+    let daemon = Daemon::bind(config, Arc::clone(&h.embedder) as Arc<dyn Embedder>)
+        .await
+        .unwrap();
+    let socket = h.socket.clone();
+    let serve = tokio::spawn(async move { daemon.serve().await });
+    wait_ready(&socket).await;
+
+    let mut obs = DaemonClient::connect_observer(&socket).await.unwrap();
+    for req in [
+        Request::Search {
+            query: "alpha".into(),
+            top_k: 3,
+        },
+        Request::SearchSimilar {
+            code: "fn x() {}".into(),
+            top_k: 3,
+        },
+        Request::GetSymbol {
+            file: "src/lib.rs".into(),
+            symbol: "alpha".into(),
+        },
+        Request::Index {
+            mode: IndexMode::Update,
+            repo_dir: h.repo.path().to_path_buf(),
+        },
+        Request::Shutdown,
+    ] {
+        let err = obs.request(req).await;
+        assert!(
+            matches!(err, Err(DaemonError::ObserverForbidden { .. })),
+            "{err:?}"
+        );
+    }
+    drop(obs);
+
+    let finished = tokio::time::timeout(Duration::from_secs(2), serve).await;
+    assert!(
+        finished.is_ok(),
+        "denied ops and observer disconnect must not extend idle"
+    );
+}
+
+#[tokio::test]
+async fn observer_can_connect_during_slow_startup() {
+    let h = Harness::new();
+    let daemon = h.start().await;
+    *daemon.state.load_delay.lock() = Some(Duration::from_millis(400));
+    let socket = h.socket.clone();
+    tokio::spawn(async move {
+        let _ = daemon.serve().await;
+    });
+
+    // Connect before ready; observers must be allowed through.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut connected = false;
+    while Instant::now() < deadline {
+        if let Ok(mut obs) = DaemonClient::connect_observer(&socket).await {
+            let status = obs.request(Request::Status).await.unwrap();
+            assert!(matches!(status, Response::Status(_)));
+            let obs_resp = obs.observe(None).await.unwrap();
+            assert!(matches!(
+                obs_resp.status.lifecycle,
+                daemon::Lifecycle::Starting | daemon::Lifecycle::Ready
+            ));
+            connected = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(connected, "observer should connect during startup");
+}
+
+#[tokio::test]
+async fn observer_can_connect_when_store_is_stale() {
+    let h = Harness::new();
+    let daemon = h.start().await;
+    let state = Arc::clone(&daemon.state);
+    let socket = h.socket.clone();
+    tokio::spawn(async move {
+        let _ = daemon.serve().await;
+    });
+    wait_ready(&socket).await;
+    *state.serving.write().unwrap() =
+        daemon::resident::ServingState::Stale("ui-001 fixture".into());
+
+    let worker_err = DaemonClient::connect(&socket).await;
+    assert!(
+        matches!(worker_err, Err(DaemonError::StoreStale { .. })),
+        "expected StoreStale for worker, got ok={}",
+        worker_err.is_ok()
+    );
+
+    let mut obs = DaemonClient::connect_observer(&socket).await.unwrap();
+    let status = obs.request(Request::Status).await.unwrap();
+    match status {
+        Response::Status(s) => assert_eq!(s.lifecycle, daemon::Lifecycle::Stale),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn cpu_resource_fields_are_unavailable_and_search_still_works() {
+    let h = Harness::new();
+    let daemon = h.start().await;
+    let socket = h.socket.clone();
+    tokio::spawn(async move {
+        let _ = daemon.serve().await;
+    });
+    wait_ready(&socket).await;
+    let mut obs = DaemonClient::connect_observer(&socket).await.unwrap();
+    let observation = obs.observe(None).await.unwrap();
+    let r = &observation.status.resources;
+    assert!(r.device_id.is_none());
+    assert!(r.device_used_bytes.is_none());
+    assert!(r.device_total_bytes.is_none());
+    assert!(r.process_used_bytes.is_none());
+    assert!(r.model_used_bytes.is_none());
+
+    let mut c = DaemonClient::connect(&socket).await.unwrap();
+    let resp = c
+        .request(Request::Search {
+            query: "alpha".into(),
+            top_k: 3,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(resp, Response::Search(_)));
+}
+
+#[tokio::test]
+async fn restart_changes_instance_id() {
+    let h = Harness::new();
+    let daemon = h.start().await;
+    let id1 = daemon.state.instance_id.clone();
+    let socket = h.socket.clone();
+    let serve = tokio::spawn(async move { daemon.serve().await });
+    wait_ready(&socket).await;
+    let mut obs = DaemonClient::connect_observer(&socket).await.unwrap();
+    let first = obs.observe(None).await.unwrap();
+    assert_eq!(first.status.instance_id, id1);
+    drop(obs);
+    let mut worker = DaemonClient::connect(&socket).await.unwrap();
+    let _ = worker.request(Request::Shutdown).await;
+    let _ = serve.await;
+
+    let daemon = h.start().await;
+    let id2 = daemon.state.instance_id.clone();
+    assert_ne!(id1, id2);
+    let socket = h.socket.clone();
+    tokio::spawn(async move {
+        let _ = daemon.serve().await;
+    });
+    wait_ready(&socket).await;
+    let mut obs = DaemonClient::connect_observer(&socket).await.unwrap();
+    let second = obs.observe(None).await.unwrap();
+    assert_eq!(second.status.instance_id, id2);
+    let gap = obs
+        .observe(Some(daemon::EventCursor {
+            instance_id: id1,
+            sequence: 0,
+        }))
+        .await
+        .unwrap();
+    assert!(gap.gap);
+}
+
+#[tokio::test]
+async fn incomplete_handshake_times_out_without_blocking_idle() {
+    let h = Harness::new();
+    let mut config = h.config();
+    config.idle_timeout = Duration::from_secs(1);
+    let daemon = Daemon::bind(config, Arc::clone(&h.embedder) as Arc<dyn Embedder>)
+        .await
+        .unwrap();
+    let socket = h.socket.clone();
+    let serve = tokio::spawn(async move { daemon.serve().await });
+    wait_ready(&socket).await;
+
+    // Open a raw socket and never send Hello.
+    let _hanging = UnixStream::connect(&socket).await.unwrap();
+
+    let finished = tokio::time::timeout(Duration::from_secs(2), serve).await;
+    assert!(
+        finished.is_ok(),
+        "provisional incomplete handshake must not block idle exit"
+    );
+}
+
+#[tokio::test]
+async fn request_events_capture_distinct_identities_and_privacy() {
+    let h = Harness::new();
+    let daemon = h.start().await;
+    let socket = h.socket.clone();
+    tokio::spawn(async move {
+        let _ = daemon.serve().await;
+    });
+    wait_ready(&socket).await;
+
+    let secret_query = "SECRET_QUERY_SHOULD_NOT_APPEAR";
+    let secret_path = "secret_path_should_not_appear.rs";
+
+    let mut a = DaemonClient::connect(&socket).await.unwrap();
+    let mut b = DaemonClient::connect(&socket).await.unwrap();
+
+    // Both reuse request_id 2 for the first post-Hello request (next_id starts at 1 for Hello).
+    let ok = a
+        .request(Request::Search {
+            query: secret_query.into(),
+            top_k: 3,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(ok, Response::Search(_)));
+
+    let err = b
+        .request(Request::GetSymbol {
+            file: secret_path.into(),
+            symbol: "nope".into(),
+        })
+        .await;
+    assert!(matches!(err, Err(DaemonError::SymbolNotFound { .. })));
+
+    let mut obs = DaemonClient::connect_observer(&socket).await.unwrap();
+    let observation = obs.observe(None).await.unwrap();
+    assert!(
+        observation.events.len() >= 2,
+        "expected terminal events, got {}",
+        observation.events.len()
+    );
+
+    let search_ev = observation
+        .events
+        .iter()
+        .find(|e| e.operation == "Search" && e.outcome == "ok")
+        .expect("search event");
+    let symbol_ev = observation
+        .events
+        .iter()
+        .find(|e| e.operation == "GetSymbol" && e.outcome == "error")
+        .expect("symbol error event");
+
+    assert_eq!(search_ev.request_id, 2);
+    assert_eq!(symbol_ev.request_id, 2);
+    assert_ne!(
+        search_ev.connection_id, symbol_ev.connection_id,
+        "distinct connections"
+    );
+    assert_ne!(
+        search_ev.cursor.sequence, symbol_ev.cursor.sequence,
+        "distinct sequences"
+    );
+    assert_eq!(symbol_ev.error_code.as_deref(), Some("symbol_not_found"));
+
+    let blob = format!("{observation:?}");
+    assert!(
+        !blob.contains(secret_query),
+        "query must not appear in diagnostics"
+    );
+    assert!(
+        !blob.contains(secret_path),
+        "path must not appear in diagnostics"
+    );
+}
+
+#[tokio::test]
+async fn index_progress_visible_to_observer_before_client_delivery() {
+    let h = Harness::new();
+    let daemon = h.start().await;
+    *daemon.state.index_phase_delay.lock() = Some(Duration::from_millis(50));
+    let socket = h.socket.clone();
+    tokio::spawn(async move {
+        let _ = daemon.serve().await;
+    });
+    wait_ready(&socket).await;
+
+    let s = socket.clone();
+    let repo = h.repo.path().to_path_buf();
+    let indexer = tokio::spawn(async move {
+        let mut c = DaemonClient::connect(&s).await.unwrap();
+        c.request(Request::Index {
+            mode: IndexMode::Update,
+            repo_dir: repo,
+        })
+        .await
+    });
+
+    let mut saw_progress = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Ok(mut obs) = DaemonClient::connect_observer(&socket).await
+            && let Ok(observation) = obs.observe(None).await
+            && (observation.status.current_progress.is_some()
+                || observation.status.lifecycle == daemon::Lifecycle::Indexing
+                || observation.events.iter().any(|e| e.operation == "Index"))
+        {
+            saw_progress = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let index_res = indexer.await.unwrap();
+    assert!(index_res.is_ok(), "{index_res:?}");
+    assert!(saw_progress, "observer should see indexing activity");
+
+    let mut obs = DaemonClient::connect_observer(&socket).await.unwrap();
+    let observation = obs.observe(None).await.unwrap();
+    assert!(
+        observation.status.last_index.is_some(),
+        "last index completion should be retained"
+    );
+    assert_eq!(
+        observation.status.last_index.as_ref().unwrap().outcome,
+        "ok"
+    );
 }

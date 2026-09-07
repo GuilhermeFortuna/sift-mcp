@@ -323,19 +323,22 @@ pub fn evaluate(searcher: &Searcher, labels: &[Label], ablations: &[Ablation])
     achieved label count with the confidence interval it implies for a top-3
     near 0.80, per-rule rejection counts, and a read sample of accepted pairs
     judged for whether they are genuinely answerable from the code.
-18. Human step: run `cargo run --release -p eval --example evaluate --
-    <store-path> --ablations` and report top-1, top-3, top-10, MRR, p50 and p95
-    latency, peak GPU memory, and label counts for each of the three ablations.
-19. Human step: run `cargo run --release -p eval --example proxy_kpi --
-    <repo-path> <store-path>` and report median bytes before hit for the MCP
-    path and for the baseline, with the baseline command.
-20. Human step: run `cargo run --release -p eval --example evaluate --
-    <store-path> --set handwritten` and report its results separately, as a
-    sanity check only.
+18. Human step: run `cargo run --release -p eval --features cuda --example
+    evaluate -- <store-path> --model <model-dir> --ablations` and report top-1,
+    top-3, top-10, MRR, p50 and p95 latency, peak GPU memory, and label counts
+    for each of the three ablations.
+19. Human step: run `cargo run --release -p eval --features cuda --example
+    proxy_kpi -- <repo-path> <store-path> --model <model-dir>` and report
+    median bytes before hit for the MCP path and for the baseline, with the
+    baseline command.
+20. Human step: run `cargo run --release -p eval --features cuda --example
+    evaluate -- <store-path> --model <model-dir> --set handwritten` and report
+    its results separately, as a sanity check only.
 21. Human step: build a store over a first-party repository in this project's
-    working languages and run `cargo run --release -p eval --example evaluate --
-    <store-path> --set docstring`, reporting its figures beside the mined
-    corpus's rather than merged, and noting any gap between the two.
+    working languages and run `cargo run --release -p eval --features cuda
+    --example evaluate -- <store-path> --model <model-dir> --set docstring`,
+    reporting its figures beside the mined corpus's rather than merged, and
+    noting any gap between the two.
 22. Run the full validation suite and confirm it passes.
 
 ## Validation
@@ -345,8 +348,10 @@ pub fn evaluate(searcher: &Searcher, labels: &[Label], ablations: &[Ablation])
   reconciliation.
 - **Integration:** mining over a fixture history exercising every filter rule;
   determinism across two runs; docstring hold-out; discard accounting;
-  three-ablation evaluation with `MockEmbedder`; breakdown partitioning; proxy
-  KPI on a hand-computed case; manifest round trip.
+  three-ablation evaluation with a deterministic test embedder; breakdown
+  partitioning; proxy KPI on a hand-computed case; manifest round trip. The
+  runnable evaluation examples use the production model contract described in
+  the human commands below.
 - **Regression:** the fixture history's expected label set is the locked
   reference for mining; a change to filters must show as a diff there and bump
   `harness_version`.
@@ -366,9 +371,9 @@ cargo test --workspace
 cargo build --workspace --release
 ./ci.sh
 cargo run --release -p eval --example mine -- ~/llama.cpp --report
-cargo run --release -p eval --example evaluate -- <store-path> --ablations
-cargo run --release -p eval --example proxy_kpi -- <repo-path> <store-path>
-cargo run --release -p eval --example evaluate -- <store-path> --set handwritten
+cargo run --release -p eval --features cuda --example evaluate -- <store-path> --model <model-dir> --ablations
+cargo run --release -p eval --features cuda --example proxy_kpi -- <repo-path> <store-path> --model <model-dir>
+cargo run --release -p eval --features cuda --example evaluate -- <store-path> --model <model-dir> --set handwritten
 ```
 
 ## Handoff

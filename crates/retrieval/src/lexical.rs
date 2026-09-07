@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+use tantivy::ReloadPolicy;
 use tantivy::collector::{Collector, SegmentCollector, TopDocs, TopNComputer};
 use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, TermQuery};
 use tantivy::schema::{
@@ -34,6 +36,7 @@ const INDEX_DIRECTORY: &str = "lexical";
 const TOKENIZER_NAME: &str = "code";
 const WRITER_MEMORY_BYTES: usize = 50_000_000;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LexicalDoc {
     pub symbol: String,
     pub signature: String,
@@ -63,6 +66,7 @@ struct Fields {
 }
 
 pub struct LexicalIndex {
+    index: Index,
     writer: IndexWriter,
     reader: IndexReader,
     fields: Fields,
@@ -202,6 +206,7 @@ impl LexicalIndex {
             .map_err(tantivy_error)?;
         let reader = index.reader().map_err(tantivy_error)?;
         Ok(Self {
+            index,
             writer,
             reader,
             fields,
@@ -285,6 +290,19 @@ impl LexicalIndex {
             reader: self.reader.clone(),
             fields: self.fields,
         }
+    }
+
+    /// Build a read-only handle that never reloads after construction.
+    pub fn frozen_search_handle(&self) -> Result<LexicalSearchHandle, RetrievalError> {
+        Ok(LexicalSearchHandle {
+            reader: self
+                .index
+                .reader_builder()
+                .reload_policy(ReloadPolicy::Manual)
+                .try_into()
+                .map_err(tantivy_error)?,
+            fields: self.fields,
+        })
     }
 
     /// Load stored bodies for `rows` in request order. Missing rows yield `None`.
@@ -490,6 +508,34 @@ mod tests {
         let results = index.search("unique1", 10).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].row, rows[1]);
+    }
+
+    #[test]
+    fn search_handle_remains_on_its_generation_after_commit() {
+        let dir = tempdir().unwrap();
+        let mut store = ChunkStore::create(dir.path(), 1, "test").unwrap();
+        let records = [record(0), record(1)];
+        let rows = store
+            .insert_batch(
+                &records
+                    .iter()
+                    .take(1)
+                    .map(|record| (record.clone(), vec![f16::from_f32(0.0)]))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let mut index = LexicalIndex::open(dir.path()).unwrap();
+        index.add_batch(&[(rows[0], document(0))]).unwrap();
+        index.commit().unwrap();
+        let frozen = index.frozen_search_handle().unwrap();
+
+        let new_row = store
+            .insert_batch(&[(records[1].clone(), vec![f16::from_f32(0.0)])])
+            .unwrap()[0];
+        index.add_batch(&[(new_row, document(1))]).unwrap();
+        index.commit().unwrap();
+
+        assert!(frozen.search("unique1", 10).unwrap().is_empty());
     }
 
     #[test]

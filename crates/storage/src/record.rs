@@ -1,4 +1,6 @@
-/// blake3 over the normalized symbol body. Excludes the file path by design.
+/// blake3 over the normalized symbol body. Excludes the file path by design;
+/// multiple live rows may carry the same hash when a chunk occurs in multiple
+/// files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ContentHash(pub(crate) [u8; 32]);
 

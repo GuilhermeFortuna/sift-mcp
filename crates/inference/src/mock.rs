@@ -86,6 +86,13 @@ impl Embedder for MockEmbedder {
             self.embed_batch(chunk, role)
         })
     }
+
+    fn resource_usage(&self) -> crate::embedder::ResourceUsage {
+        crate::embedder::ResourceUsage {
+            execution_provider: Some("cpu".into()),
+            ..Default::default()
+        }
+    }
 }
 
 #[cfg(test)]

@@ -74,6 +74,7 @@ impl Harness {
             idle_timeout: Duration::from_secs(60),
             max_concurrent_searches: 4,
             fusion: FusionConfig::default(),
+            record_events: true,
         }
     }
 
@@ -152,7 +153,12 @@ async fn wait_ready(socket: &Path) {
     loop {
         if let Ok(mut c) = DaemonClient::connect(socket).await {
             match c.request(Request::Status).await {
-                Ok(Response::Status(s)) if !s.model_id.is_empty() && !s.indexing => return,
+                Ok(Response::Status(s))
+                    if s.model_id.as_ref().is_some_and(|m| !m.is_empty())
+                        && s.lifecycle == daemon::Lifecycle::Ready =>
+                {
+                    return;
+                }
                 Err(DaemonError::Starting) => {}
                 _ => {}
             }
@@ -292,24 +298,20 @@ async fn cold_start_spawns_daemon_and_searches() {
         std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
     }
 
-    let bin = std::env::var_os("CARGO_BIN_EXE_sift_daemon_test")
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/sift-daemon-test")
-        });
-    if !bin.exists() {
-        let status = std::process::Command::new("cargo")
-            .args(["build", "-p", "daemon", "--bin", "sift-daemon-test"])
-            .status()
-            .unwrap();
-        assert!(status.success());
-    }
-    let bin = if bin.exists() {
-        bin
-    } else {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/sift-daemon-test")
-    };
-    assert!(bin.exists(), "sift-daemon missing at {}", bin.display());
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    let bin = target_dir.join("debug/sift-daemon-test");
+    let status = std::process::Command::new("cargo")
+        .args(["build", "-p", "daemon", "--bin", "sift-daemon-test"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to build sift-daemon-test");
+    assert!(
+        bin.exists(),
+        "sift-daemon-test missing at {}",
+        bin.display()
+    );
 
     let server = SiftMcpServer::with_config(SiftMcpConfig {
         store_dir: h.store_dir.path().to_path_buf(),

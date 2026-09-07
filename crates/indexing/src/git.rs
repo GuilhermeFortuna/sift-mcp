@@ -44,6 +44,27 @@ impl RepoGit {
         Ok(id.to_string())
     }
 
+    /// Return every path in the current HEAD tree, including paths absent from
+    /// the working directory.
+    pub fn head_files(&self) -> Result<Vec<String>, IndexError> {
+        let output = std::process::Command::new("git")
+            .args(["ls-tree", "-r", "-z", "--name-only", "HEAD"])
+            .current_dir(&self.root)
+            .output()
+            .map_err(|e| IndexError::Git(e.to_string()))?;
+        if !output.status.success() {
+            return Err(IndexError::Git(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+        Ok(output
+            .stdout
+            .split(|&byte| byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| String::from_utf8_lossy(path).replace('\\', "/"))
+            .collect())
+    }
+
     pub fn changes_since(&self, base: &str) -> Result<Vec<FileChange>, IndexError> {
         let base_id = self
             .repo

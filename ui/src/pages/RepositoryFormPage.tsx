@@ -1,0 +1,7 @@
+import { useEffect, useState } from 'react';
+import { api } from '../api/client';
+import type { Registration, RegistrationInput } from '../api/types';
+import { emptyRepositoryForm } from '../repository-operations';
+import { RepositoryForm } from '../components/RepositoryForm';
+
+export function RepositoryFormPage({ id }: { id?: string }) { const [initial, setInitial] = useState<RegistrationInput>(emptyRepositoryForm); const [saving, setSaving] = useState(false); const [serverError, setServerError] = useState<{ code: string; message: string } | null>(null); useEffect(() => { if (id) api<Registration>(`/repositories/${id}`).then((r) => setInitial(r.config)).catch((e) => setServerError(e)); }, [id]); const save = async (values: RegistrationInput) => { setSaving(true); setServerError(null); try { await api<Registration>(id ? `/repositories/${id}` : '/repositories', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(values) }); window.location.assign(id ? `/repositories/${id}` : '/repositories'); } catch (e) { setServerError(e as { code: string; message: string }); throw e; } finally { setSaving(false); } }; return <><header className="page-header compact"><div><a className="back-link" href={id ? `/repositories/${id}` : '/repositories'}>← Back</a><p className="eyebrow">Repository setup</p><h1>{id ? 'Edit registration' : 'Attach a repository'}</h1></div></header><RepositoryForm initialValues={initial} onSave={save} onCancel={() => window.location.assign(id ? `/repositories/${id}` : '/repositories')} saving={saving} serverError={serverError} /></>; }

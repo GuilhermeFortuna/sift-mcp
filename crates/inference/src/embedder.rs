@@ -20,6 +20,27 @@ pub struct Embedding {
     pub truncated: bool,
 }
 
+/// Live GPU/process resource sample. Unavailable fields stay `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ResourceUsage {
+    pub execution_provider: Option<String>,
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+    pub device_utilization_percent: Option<u8>,
+    pub device_used_bytes: Option<u64>,
+    pub device_total_bytes: Option<u64>,
+    pub process_used_bytes: Option<u64>,
+    pub process_cpu_percent: Option<u8>,
+    /// Model-attributable bytes; stays unavailable without allocator-level data.
+    pub model_used_bytes: Option<u64>,
+}
+
+impl ResourceUsage {
+    pub fn unavailable() -> Self {
+        Self::default()
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum InferError {
     #[error("model files missing at {path}")]
@@ -45,6 +66,12 @@ pub trait Embedder: Send + Sync {
     /// Splits internally at the configured batch limit. Output order matches
     /// input order. `role` selects the prefix convention from metadata.
     fn embed(&self, texts: &[&str], role: Role) -> Result<Vec<Embedding>, InferError>;
+
+    /// Sample device/process resource usage. Default is all-unavailable.
+    /// Must not fail the caller; return unavailable fields on error.
+    fn resource_usage(&self) -> ResourceUsage {
+        ResourceUsage::unavailable()
+    }
 }
 
 /// Shared batch-splitting wrapper used by backends with a configured limit.
@@ -63,4 +90,40 @@ where
         out.extend(embed_batch(chunk, role)?);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mock::MockEmbedder;
+
+    #[test]
+    fn mock_resource_usage_identifies_cpu_provider() {
+        let m = MockEmbedder::new(8);
+        let u = m.resource_usage();
+        assert_eq!(u.execution_provider.as_deref(), Some("cpu"));
+        assert!(u.device_id.is_none());
+        assert!(u.device_used_bytes.is_none());
+        assert!(u.device_total_bytes.is_none());
+        assert!(u.process_used_bytes.is_none());
+        assert!(u.model_used_bytes.is_none());
+    }
+
+    #[test]
+    fn measured_zero_stays_zero() {
+        let u = ResourceUsage {
+            execution_provider: Some("cuda".into()),
+            device_id: Some("GPU-test".into()),
+            device_name: None,
+            device_utilization_percent: None,
+            device_used_bytes: Some(0),
+            device_total_bytes: Some(1),
+            process_used_bytes: Some(0),
+            process_cpu_percent: None,
+            model_used_bytes: None,
+        };
+        assert_eq!(u.device_used_bytes, Some(0));
+        assert_eq!(u.process_used_bytes, Some(0));
+        assert!(u.model_used_bytes.is_none());
+    }
 }

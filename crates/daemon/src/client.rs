@@ -9,9 +9,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::process::Command;
 
+const MAX_STARTUP_STDERR_BYTES: usize = 64 * 1024;
+
 use crate::codec::encode;
 use crate::paths::socket_path_for_store;
-use crate::protocol::{DaemonError, Envelope, PROTOCOL_VERSION, Request, Response};
+use crate::protocol::{
+    DaemonError, Envelope, EventCursor, OBSERVER_CLIENT, Observation, PROTOCOL_VERSION, Request,
+    Response,
+};
 
 pub struct DaemonClient {
     stream: UnixStream,
@@ -22,27 +27,49 @@ pub struct DaemonClient {
 
 impl DaemonClient {
     pub async fn connect(socket_path: &Path) -> Result<Self, DaemonError> {
+        Self::connect_with_client(socket_path, "daemon-client").await
+    }
+
+    /// Connect as a passive observer. Does not spawn a daemon.
+    pub async fn connect_observer(socket_path: &Path) -> Result<Self, DaemonError> {
+        Self::connect_with_client(socket_path, OBSERVER_CLIENT).await
+    }
+
+    async fn connect_with_client(socket_path: &Path, client: &str) -> Result<Self, DaemonError> {
         let stream = UnixStream::connect(socket_path)
             .await
             .map_err(|e| DaemonError::Internal {
                 detail: format!("connect {}: {e}", socket_path.display()),
             })?;
-        let mut client = Self {
+        let mut client_conn = Self {
             stream,
             next_id: 1,
             socket_path: socket_path.to_path_buf(),
         };
-        let resp = client
+        let resp = client_conn
             .request(Request::Hello {
                 protocol_version: PROTOCOL_VERSION,
-                client: "daemon-client".into(),
+                client: client.into(),
             })
             .await?;
         match resp {
-            Response::Hello { .. } => Ok(client),
+            Response::Hello { .. } => Ok(client_conn),
             Response::Error(e) => Err(e),
             other => Err(DaemonError::Malformed {
                 detail: format!("unexpected hello response: {other:?}"),
+            }),
+        }
+    }
+
+    /// Poll diagnostics and recent request events.
+    pub async fn observe(
+        &mut self,
+        after: Option<EventCursor>,
+    ) -> Result<Observation, DaemonError> {
+        match self.request(Request::Observe { after }).await? {
+            Response::Observation(obs) => Ok(obs),
+            other => Err(DaemonError::Malformed {
+                detail: format!("unexpected observe response: {other:?}"),
             }),
         }
     }
@@ -57,12 +84,19 @@ impl DaemonClient {
     ) -> Result<Self, DaemonError> {
         let socket = socket_path_for_store(store_dir)?;
         let start = Instant::now();
-        let mut spawned = false;
+        let mut child: Option<tokio::process::Child> = None;
+        let mut stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>> = None;
         loop {
             if UnixStream::connect(&socket).await.is_ok() {
+                if let (Some(mut child), Some(stderr_task)) = (child.take(), stderr_task.take()) {
+                    tokio::spawn(async move {
+                        let _ = child.wait().await;
+                        let _ = stderr_task.await;
+                    });
+                }
                 return Self::connect(&socket).await;
             }
-            if !spawned {
+            if child.is_none() {
                 let mut cmd = Command::new(binary);
                 cmd.arg("--store")
                     .arg(store_dir)
@@ -74,11 +108,49 @@ impl DaemonClient {
                     .arg(&socket)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
-                    .stderr(Stdio::null());
-                cmd.spawn().map_err(|e| DaemonError::Internal {
+                    .stderr(Stdio::piped());
+                let mut spawned = cmd.spawn().map_err(|e| DaemonError::Internal {
                     detail: format!("spawn daemon: {e}"),
                 })?;
-                spawned = true;
+                let mut stderr = spawned.stderr.take().ok_or_else(|| DaemonError::Internal {
+                    detail: "spawn daemon: stderr pipe unavailable".into(),
+                })?;
+                let reader_task = tokio::spawn(async move {
+                    let mut captured = Vec::new();
+                    let mut buffer = [0u8; 4096];
+                    loop {
+                        let read = match stderr.read(&mut buffer).await {
+                            Ok(0) => break,
+                            Ok(read) => read,
+                            Err(_) => break,
+                        };
+                        if captured.len() < MAX_STARTUP_STDERR_BYTES {
+                            let remaining = MAX_STARTUP_STDERR_BYTES - captured.len();
+                            captured.extend_from_slice(&buffer[..read.min(remaining)]);
+                        }
+                    }
+                    captured
+                });
+                child = Some(spawned);
+                stderr_task = Some(reader_task);
+            }
+            if let Some(child) = child.as_mut()
+                && let Some(status) = child.try_wait().map_err(|e| DaemonError::Internal {
+                    detail: format!("wait for daemon: {e}"),
+                })?
+            {
+                let stderr = match stderr_task.take() {
+                    Some(task) => task
+                        .await
+                        .ok()
+                        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
+                        .filter(|text| !text.is_empty()),
+                    None => None,
+                };
+                let diagnostic = stderr.map(|text| format!(": {text}")).unwrap_or_default();
+                return Err(DaemonError::Internal {
+                    detail: format!("daemon exited with {status}{diagnostic}"),
+                });
             }
             if start.elapsed() >= deadline {
                 return Err(DaemonError::Internal {

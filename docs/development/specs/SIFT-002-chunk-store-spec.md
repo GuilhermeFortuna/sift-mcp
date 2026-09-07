@@ -39,8 +39,11 @@ verify. Every task that indexes, searches, or evaluates reads through it.
 - Chunks are retrievable by position, by content hash, and by file path, and
   every file's chunks are retrievable together, because incremental re-indexing
   works a file at a time.
-- The content hash is unique among live records: two chunks with identical
-  normalized bodies share one embedding rather than occupying two positions.
+- The content hash identifies normalized content for embedding reuse, but is
+  not unique among live metadata records. Identical chunks in different files
+  occupy separate positions so every occurrence retains its own location and
+  source metadata; the indexing pipeline may still compute the shared
+  embedding once.
 - Retrieving a batch of chunks by a set of positions costs one round trip, not
   one per position, because ranking returns tens of positions at once.
 
@@ -97,8 +100,9 @@ verify. Every task that indexes, searches, or evaluates reads through it.
 
 1. Allocating chunks and reading them back by position, hash, and file path
    returns identical records, verified against property-based generated input.
-2. Inserting a chunk whose content hash already exists reuses the existing
-   position and does not grow the matrix.
+2. Inserting identical content occurrences preserves a distinct position and
+   metadata record for each occurrence; embedding computation reuse is an
+   indexing-pipeline concern rather than a store uniqueness constraint.
 3. Writing a vector of the wrong width, or reading against a model identifier
    that does not match the one recorded, fails with a distinguishable error.
 4. The verification check passes on a healthy store and, on a store deliberately

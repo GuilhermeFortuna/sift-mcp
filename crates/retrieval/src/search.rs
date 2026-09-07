@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use half::f16;
 use inference::{Embedder, Role};
-use storage::{ChunkStore, RowId};
+use storage::{ChunkRecord, ChunkStore, RowId};
 
 use crate::RetrievalError;
 use crate::ScoredRow;
@@ -15,13 +15,90 @@ use crate::result::{
     SearchDiagnostics, SearchResponse, SearchResult, StageTimings, preview_from_body,
 };
 
-pub struct Searcher<'a> {
+pub trait SearchBackend {
+    fn lexical_search(&self, query: &str, limit: usize) -> Result<Vec<ScoredRow>, RetrievalError>;
+    fn dense_search(
+        &self,
+        query: &[f16],
+        model_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ScoredRow>, RetrievalError>;
+    fn records(&self, rows: &[RowId]) -> Result<Vec<Option<ChunkRecord>>, RetrievalError>;
+    fn bodies(&self, rows: &[RowId]) -> Result<Vec<Option<String>>, RetrievalError>;
+}
+
+struct IndexBackend<'a> {
     lexical: &'a LexicalIndex,
     dense: &'a DenseIndex,
     store: &'a ChunkStore,
+}
+
+impl SearchBackend for IndexBackend<'_> {
+    fn lexical_search(&self, query: &str, limit: usize) -> Result<Vec<ScoredRow>, RetrievalError> {
+        self.lexical.search_handle().search(query, limit)
+    }
+
+    fn dense_search(
+        &self,
+        query: &[f16],
+        model_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ScoredRow>, RetrievalError> {
+        self.dense.search(query, model_id, limit)
+    }
+
+    fn records(&self, rows: &[RowId]) -> Result<Vec<Option<ChunkRecord>>, RetrievalError> {
+        Ok(self.store.get_many(rows)?)
+    }
+
+    fn bodies(&self, rows: &[RowId]) -> Result<Vec<Option<String>>, RetrievalError> {
+        self.lexical.search_handle().bodies(rows)
+    }
+}
+
+enum Backend<'a> {
+    Index(IndexBackend<'a>),
+    External(&'a dyn SearchBackend),
+}
+
+impl SearchBackend for Backend<'_> {
+    fn lexical_search(&self, query: &str, limit: usize) -> Result<Vec<ScoredRow>, RetrievalError> {
+        match self {
+            Self::Index(backend) => backend.lexical_search(query, limit),
+            Self::External(backend) => backend.lexical_search(query, limit),
+        }
+    }
+
+    fn dense_search(
+        &self,
+        query: &[f16],
+        model_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ScoredRow>, RetrievalError> {
+        match self {
+            Self::Index(backend) => backend.dense_search(query, model_id, limit),
+            Self::External(backend) => backend.dense_search(query, model_id, limit),
+        }
+    }
+
+    fn records(&self, rows: &[RowId]) -> Result<Vec<Option<ChunkRecord>>, RetrievalError> {
+        match self {
+            Self::Index(backend) => backend.records(rows),
+            Self::External(backend) => backend.records(rows),
+        }
+    }
+
+    fn bodies(&self, rows: &[RowId]) -> Result<Vec<Option<String>>, RetrievalError> {
+        match self {
+            Self::Index(backend) => backend.bodies(rows),
+            Self::External(backend) => backend.bodies(rows),
+        }
+    }
+}
+
+pub struct Searcher<'a> {
+    backend: Backend<'a>,
     embedder: &'a dyn Embedder,
-    /// When true, run lexical and dense concurrently.
-    concurrent: bool,
     /// Test-only artificial delay applied inside each retriever path.
     #[cfg(test)]
     retriever_delay: Option<std::time::Duration>,
@@ -39,11 +116,12 @@ impl<'a> Searcher<'a> {
         embedder: &'a dyn Embedder,
     ) -> Self {
         Self {
-            lexical,
-            dense,
-            store,
+            backend: Backend::Index(IndexBackend {
+                lexical,
+                dense,
+                store,
+            }),
             embedder,
-            concurrent: true,
             #[cfg(test)]
             retriever_delay: None,
             #[cfg(test)]
@@ -53,10 +131,17 @@ impl<'a> Searcher<'a> {
         }
     }
 
-    /// Enable or disable concurrent retriever dispatch.
-    pub fn with_concurrent(mut self, concurrent: bool) -> Self {
-        self.concurrent = concurrent;
-        self
+    pub fn from_backend(backend: &'a dyn SearchBackend, embedder: &'a dyn Embedder) -> Self {
+        Self {
+            backend: Backend::External(backend),
+            embedder,
+            #[cfg(test)]
+            retriever_delay: None,
+            #[cfg(test)]
+            force_lexical_error: None,
+            #[cfg(test)]
+            force_dense_error: None,
+        }
     }
 
     #[cfg(test)]
@@ -146,31 +231,25 @@ impl<'a> Searcher<'a> {
             }
         };
 
-        let hooks = DispatchHooks {
-            delay,
-            force_lexical,
-            force_dense,
-        };
-        let request = DispatchRequest {
-            lexical: self.lexical,
-            dense: self.dense,
-            text,
-            query_vec: &query_vec,
-            model_id: self.embedder.model_id(),
-            config,
-            run_lexical,
-            hooks,
-        };
-
-        let outcome = if self.concurrent && run_lexical {
-            dispatch_concurrent(request)
+        let (lexical_result, lexical_millis) = if run_lexical {
+            let started = Instant::now();
+            let result = (|| {
+                maybe_force_lexical_error(force_lexical)?;
+                maybe_delay(delay);
+                self.backend.lexical_search(text, config.lexical_depth)
+            })();
+            (result, started.elapsed().as_millis() as u64)
         } else {
-            dispatch_sequential(request)
+            (Ok(Vec::new()), 0)
         };
-        let lexical_result = outcome.lexical;
-        let dense_result = outcome.dense;
-        let lexical_millis = outcome.lexical_millis;
-        let dense_millis = outcome.dense_millis;
+        let dense_started = Instant::now();
+        let dense_result = (|| {
+            maybe_force_dense_error(force_dense)?;
+            maybe_delay(delay);
+            self.backend
+                .dense_search(&query_vec, self.embedder.model_id(), config.dense_depth)
+        })();
+        let dense_millis = dense_started.elapsed().as_millis() as u64;
 
         let mut lexical_ok = true;
         let mut dense_ok = true;
@@ -206,7 +285,7 @@ impl<'a> Searcher<'a> {
         let fuse_millis = fuse_started.elapsed().as_millis() as u64;
 
         let assemble_started = Instant::now();
-        let results = assemble(self.store, self.lexical, &fused, top_k)?;
+        let results = assemble(&self.backend, &fused, top_k)?;
         let assemble_millis = assemble_started.elapsed().as_millis() as u64;
 
         let total = wall.elapsed().as_millis() as u64;
@@ -250,125 +329,15 @@ fn maybe_force_dense_error(forced: Option<&str>) -> Result<(), RetrievalError> {
     Ok(())
 }
 
-struct DispatchRequest<'a> {
-    lexical: &'a LexicalIndex,
-    dense: &'a DenseIndex,
-    text: &'a str,
-    query_vec: &'a [f16],
-    model_id: &'a str,
-    config: &'a FusionConfig,
-    run_lexical: bool,
-    hooks: DispatchHooks<'a>,
-}
-
-struct DispatchHooks<'a> {
-    delay: Option<std::time::Duration>,
-    force_lexical: Option<&'a str>,
-    force_dense: Option<&'a str>,
-}
-
-struct DispatchOutcome {
-    lexical: Result<Vec<ScoredRow>, RetrievalError>,
-    dense: Result<Vec<ScoredRow>, RetrievalError>,
-    lexical_millis: u64,
-    dense_millis: u64,
-}
-
-fn dispatch_sequential(request: DispatchRequest<'_>) -> DispatchOutcome {
-    let lexical_pair = if request.run_lexical {
-        let started = Instant::now();
-        let result = (|| {
-            maybe_force_lexical_error(request.hooks.force_lexical)?;
-            maybe_delay(request.hooks.delay);
-            request
-                .lexical
-                .search(request.text, request.config.lexical_depth)
-        })();
-        (result, started.elapsed().as_millis() as u64)
-    } else {
-        (Ok(Vec::new()), 0)
-    };
-
-    let dense_started = Instant::now();
-    let dense_result = (|| {
-        maybe_force_dense_error(request.hooks.force_dense)?;
-        maybe_delay(request.hooks.delay);
-        request.dense.search(
-            request.query_vec,
-            request.model_id,
-            request.config.dense_depth,
-        )
-    })();
-    DispatchOutcome {
-        lexical: lexical_pair.0,
-        dense: dense_result,
-        lexical_millis: lexical_pair.1,
-        dense_millis: dense_started.elapsed().as_millis() as u64,
-    }
-}
-
-fn dispatch_concurrent(request: DispatchRequest<'_>) -> DispatchOutcome {
-    let handle = request.lexical.search_handle();
-    let text_owned = request.text.to_owned();
-    let query_owned = request.query_vec.to_vec();
-    let model_owned = request.model_id.to_owned();
-    let lexical_depth = request.config.lexical_depth;
-    let dense_depth = request.config.dense_depth;
-    let delay = request.hooks.delay;
-    let force_lexical = request.hooks.force_lexical;
-    let force_dense = request.hooks.force_dense;
-    let dense = request.dense;
-
-    let mut lexical_out = None;
-    let mut dense_out = None;
-    let mut lexical_millis = 0;
-    let mut dense_millis = 0;
-
-    std::thread::scope(|scope| {
-        let lexical_thread = scope.spawn(|| {
-            let started = Instant::now();
-            let result = (|| {
-                maybe_force_lexical_error(force_lexical)?;
-                maybe_delay(delay);
-                handle.search(&text_owned, lexical_depth)
-            })();
-            (result, started.elapsed().as_millis() as u64)
-        });
-        let dense_thread = scope.spawn(|| {
-            let started = Instant::now();
-            let result = (|| {
-                maybe_force_dense_error(force_dense)?;
-                maybe_delay(delay);
-                dense.search(&query_owned, &model_owned, dense_depth)
-            })();
-            (result, started.elapsed().as_millis() as u64)
-        });
-        let (lex_result, lex_ms) = lexical_thread.join().expect("lexical thread");
-        let (den_result, den_ms) = dense_thread.join().expect("dense thread");
-        lexical_out = Some(lex_result);
-        dense_out = Some(den_result);
-        lexical_millis = lex_ms;
-        dense_millis = den_ms;
-    });
-
-    DispatchOutcome {
-        lexical: lexical_out.expect("lexical result"),
-        dense: dense_out.expect("dense result"),
-        lexical_millis,
-        dense_millis,
-    }
-}
-
 fn assemble(
-    store: &ChunkStore,
-    lexical: &LexicalIndex,
+    backend: &dyn SearchBackend,
     fused: &[crate::fusion::FusedRow],
     top_k: usize,
 ) -> Result<Vec<SearchResult>, RetrievalError> {
     let selected: Vec<_> = fused.iter().take(top_k).collect();
     let row_ids: Vec<RowId> = selected.iter().map(|row| row.row).collect();
-    let records = store.get_many(&row_ids)?;
-    let bodies = lexical.bodies(&row_ids)?;
+    let records = backend.records(&row_ids)?;
+    let bodies = backend.bodies(&row_ids)?;
 
     let mut results = Vec::with_capacity(selected.len());
     for (index, fused_row) in selected.iter().enumerate() {
@@ -522,46 +491,10 @@ mod tests {
     }
 
     #[test]
-    fn retrievers_run_concurrently_when_enabled() {
-        use std::sync::Mutex;
-        use std::time::{Duration, Instant};
-
+    fn retrievers_run_sequentially_inside_call() {
+        use std::time::Duration;
         let fixture = build_fixture();
         let delay = Duration::from_millis(40);
-        let lex_times = Mutex::new(None);
-        let den_times = Mutex::new(None);
-
-        // Instrument via the same concurrent join used by Searcher: overlapping
-        // sleeps prove the paths are not serialized.
-        let handle = fixture.lexical.search_handle();
-        let dense = &fixture.dense;
-        let query_vec = fixture.embedder.query_matching("clamp_decoder_timestamps");
-        let model_id = fixture.embedder.model_id().to_owned();
-
-        let wall = Instant::now();
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                let enter = Instant::now();
-                std::thread::sleep(delay);
-                let _ = handle.search("clamp_decoder_timestamps", 10);
-                let exit = Instant::now();
-                *lex_times.lock().unwrap() = Some((enter, exit));
-            });
-            scope.spawn(|| {
-                let enter = Instant::now();
-                std::thread::sleep(delay);
-                let _ = dense.search(&query_vec, &model_id, 10);
-                let exit = Instant::now();
-                *den_times.lock().unwrap() = Some((enter, exit));
-            });
-        });
-        let wall_ms = wall.elapsed().as_millis() as u64;
-
-        let (lex_enter, lex_exit) = lex_times.lock().unwrap().unwrap();
-        let (den_enter, den_exit) = den_times.lock().unwrap().unwrap();
-        let overlap = lex_enter < den_exit && den_enter < lex_exit;
-        assert!(overlap, "retriever intervals must overlap");
-
         let searcher = Searcher::new(
             &fixture.lexical,
             &fixture.dense,
@@ -574,16 +507,11 @@ mod tests {
             .unwrap();
         let stages = &response.diagnostics.stage_millis;
         assert!(
-            stages.total < stages.lexical + stages.dense,
-            "total {} should be less than lexical+dense {}+{}",
+            stages.total >= stages.lexical + stages.dense,
+            "total {} should include lexical+dense {}+{}",
             stages.total,
             stages.lexical,
             stages.dense
-        );
-        // Wall of the instrumented pair should also beat serialized 2*delay.
-        assert!(
-            wall_ms < (delay.as_millis() as u64) * 2,
-            "wall {wall_ms} should be under 2*delay"
         );
     }
 
